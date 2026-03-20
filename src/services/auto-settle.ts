@@ -27,6 +27,14 @@ interface GameScore {
 export async function runAutoSettle(): Promise<void> {
   if (!isDatabaseConfigured()) return;
 
+  // Only run during game hours (10am - 2am ET) to save API calls
+  const nowET = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+  const hour = nowET.getHours();
+  if (hour >= 2 && hour < 10) {
+    console.error("[AutoSettle] Outside game hours (2am-10am ET) — skipping");
+    return;
+  }
+
   try {
     // Find all unsettled bets
     const pendingBets = (await query(
@@ -161,9 +169,19 @@ export async function runEnhancedClvCapture(): Promise<void> {
   }
 }
 
+// ── Score Cache (avoid redundant API calls) ──────────────────────────────────
+
+const scoreCache = new Map<string, { scores: GameScore[]; fetchedAt: number }>();
+const SCORE_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
 // ── Score Fetching ───────────────────────────────────────────────────────────
 
 async function fetchScores(sport: string): Promise<GameScore[]> {
+  // Check cache first
+  const cached = scoreCache.get(sport);
+  if (cached && Date.now() - cached.fetchedAt < SCORE_CACHE_TTL) {
+    return cached.scores;
+  }
   const scores: GameScore[] = [];
   const today = new Date().toISOString().slice(0, 10);
 
@@ -271,6 +289,9 @@ async function fetchScores(sport: string): Promise<GameScore[]> {
   } catch (err) {
     console.error(`[AutoSettle] Score fetch for ${sport} failed:`, err);
   }
+
+  // Cache results
+  scoreCache.set(sport, { scores, fetchedAt: Date.now() });
 
   return scores;
 }
