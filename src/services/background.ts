@@ -3,12 +3,14 @@
  * - Line snapshots every 15 minutes (records odds to Postgres)
  * - Alert scanning every 5 minutes (fires webhooks)
  * - CLV auto-capture every 2 minutes (closing lines for logged bets)
+ * - Auto-settle every 10 minutes (pulls final scores, settles bets)
  */
 
 import { getLiveOdds, GameOdds } from "../tools/betting/odds.js";
 import { manageAlerts } from "../tools/betting/alerts.js";
 import { query, isDatabaseConfigured } from "../db/client.js";
 import { americanToImpliedProb } from "../utils/helpers.js";
+import { runAutoSettle, runEnhancedClvCapture } from "./auto-settle.js";
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -48,6 +50,18 @@ export function startBackgroundServices(): void {
   if (isDatabaseConfigured()) {
     runOpeningLineCapture();
     intervals.push(setInterval(runOpeningLineCapture, 30 * 60 * 1000));
+  }
+
+  // 5. Auto-settle bets every 10 minutes (pulls final scores, settles pending bets)
+  if (isDatabaseConfigured()) {
+    setTimeout(runAutoSettle, 60 * 1000); // Delay 1 min to let other services initialize
+    intervals.push(setInterval(runAutoSettle, 10 * 60 * 1000));
+  }
+
+  // 6. Enhanced CLV capture every 3 minutes (works without game_date)
+  if (isDatabaseConfigured()) {
+    runEnhancedClvCapture();
+    intervals.push(setInterval(runEnhancedClvCapture, 3 * 60 * 1000));
   }
 
   console.error("[Background] All services started");
