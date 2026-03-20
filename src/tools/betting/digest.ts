@@ -11,7 +11,6 @@ import { getInjuryReport } from "./injury.js";
 import { getConsensusPicks } from "./consensus.js";
 import { manageBankroll } from "../learning/bankroll.js";
 import { isDatabaseConfigured, query } from "../../db/client.js";
-
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export interface DailyDigest {
@@ -37,6 +36,72 @@ export interface DailyDigest {
 
 // ── Implementation ───────────────────────────────────────────────────────────
 
+// ── Schedule APIs (free, no key needed) ─────────────────────────────────────
+
+interface ScheduledGame {
+  home: string;
+  away: string;
+  start_time: string;
+  status?: string;
+}
+
+async function getTodaysSchedule(sport: string): Promise<ScheduledGame[]> {
+  const today = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
+
+  try {
+    if (sport === "nba") {
+      // NBA free schedule: balldontlie or nba.com proxy
+      const resp = await fetch(
+        `https://api.balldontlie.io/v1/games?dates[]=${today}`,
+        { headers: process.env.BALLDONTLIE_API_KEY ? { Authorization: process.env.BALLDONTLIE_API_KEY } : {} }
+      );
+      if (resp.ok) {
+        const data = await resp.json() as { data: Array<{ home_team: { full_name: string }; visitor_team: { full_name: string }; status: string; date: string }> };
+        return (data.data ?? []).map((g) => ({
+          home: g.home_team.full_name,
+          away: g.visitor_team.full_name,
+          start_time: g.date,
+          status: g.status,
+        }));
+      }
+    }
+
+    if (sport === "nhl") {
+      // NHL free schedule
+      const resp = await fetch(`https://api-web.nhle.com/v1/schedule/${today}`);
+      if (resp.ok) {
+        const data = await resp.json() as { gameWeek: Array<{ date: string; games: Array<{ homeTeam: { placeName: { default: string } }; awayTeam: { placeName: { default: string } }; startTimeUTC: string; gameState: string }> }> };
+        const todayGames = data.gameWeek?.find((w) => w.date === today)?.games ?? [];
+        return todayGames.map((g) => ({
+          home: g.homeTeam.placeName.default,
+          away: g.awayTeam.placeName.default,
+          start_time: g.startTimeUTC,
+          status: g.gameState,
+        }));
+      }
+    }
+
+    if (sport === "mlb") {
+      // MLB free schedule via statsapi
+      const resp = await fetch(`https://statsapi.mlb.com/api/v1/schedule?date=${today}&sportId=1`);
+      if (resp.ok) {
+        const data = await resp.json() as { dates: Array<{ games: Array<{ teams: { home: { team: { name: string } }; away: { team: { name: string } } }; gameDate: string; status: { detailedState: string } }> }> };
+        const games = data.dates?.[0]?.games ?? [];
+        return games.map((g) => ({
+          home: g.teams.home.team.name,
+          away: g.teams.away.team.name,
+          start_time: g.gameDate,
+          status: g.status.detailedState,
+        }));
+      }
+    }
+  } catch (error) {
+    console.error(`[Digest] Schedule fetch failed for ${sport}:`, error);
+  }
+
+  return [];
+}
+
 export async function getDailyDigest(params: {
   sports?: string[];
 } = {}): Promise<DailyDigest> {
@@ -56,15 +121,42 @@ export async function getDailyDigest(params: {
   // ── Section 1: Today's games ─────────────────────────────────────────────
   for (const sport of sports) {
     try {
-      const games: GameOdds[] = await getLiveOdds({ sport });
+      // Fetch both odds and schedule
+      const [games, schedule] = await Promise.all([
+        getLiveOdds({ sport }),
+        getTodaysSchedule(sport),
+      ]);
+
+      // Merge schedule with odds: games with odds take precedence, others filled from schedule
+      const gameMap = new Map(games.map((g) => [
+        `${g.away_team}_${g.home_team}`.toLowerCase(),
+        { home: g.home_team, away: g.away_team, commence_time: g.commence_time },
+      ]));
+
+      const scheduleGames = schedule.map((s) => ({
+        home: s.home,
+        away: s.away,
+        commence_time: s.start_time,
+      }));
+
+      // Add schedule games that don't have odds yet
+      const mergedGames = [...games.map((g) => ({
+        home: g.home_team,
+        away: g.away_team,
+        commence_time: g.commence_time,
+      }))];
+
+      for (const sg of scheduleGames) {
+        const key = `${sg.away}_${sg.home}`.toLowerCase();
+        if (!gameMap.has(key)) {
+          mergedGames.push(sg);
+        }
+      }
+
       digest.todays_games.push({
         sport,
-        game_count: games.length,
-        games: games.map((g) => ({
-          home: g.home_team,
-          away: g.away_team,
-          commence_time: g.commence_time,
-        })),
+        game_count: mergedGames.length,
+        games: mergedGames,
       });
     } catch (error) {
       console.error(`[Digest] Failed to fetch games for ${sport}:`, error);

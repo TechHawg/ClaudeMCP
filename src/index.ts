@@ -44,6 +44,8 @@ import { manageBankroll } from "./tools/learning/bankroll.js";
 import { manageAlerts } from "./tools/betting/alerts.js";
 import { getConsensusPicks } from "./tools/betting/consensus.js";
 import { getDailyDigest } from "./tools/betting/digest.js";
+import { scanAlternateLines } from "./tools/betting/altlines.js";
+import { getCLVLeaderboard } from "./tools/learning/clv_leaderboard.js";
 import { truncateIfNeeded } from "./utils/helpers.js";
 import { initializeSchema, seedSituationalAngles } from "./db/client.js";
 import { startBackgroundServices } from "./services/background.js";
@@ -328,6 +330,7 @@ Returns: Combined odds, true probability, juice %, EV %, correlation warnings, r
         .min(2)
         .describe("Parlay legs"),
       books: z.array(z.string()).optional().describe("Preferred books"),
+      sport: z.string().optional().describe("Sport for correlation model (nba, nfl, mlb, nhl)"),
     },
     annotations: {
       readOnlyHint: true,
@@ -1148,8 +1151,10 @@ Args:
   - away_team (optional): For matchup prediction
   - winner / loser (optional): For recording results
   - home_score / away_score (optional): For margin-weighted updates
+  - home_rest (optional): "back_to_back" | "3_in_4" | "4_in_5" | "well_rested_3plus" | "short_week" | "long_week"
+  - away_rest (optional): Same options — adjusts Elo for fatigue/rest
 
-Returns: Team ratings, matchup prediction with fair ML odds, or updated Elo.`,
+Returns: Team ratings, matchup prediction with fair ML odds and rest adjustments, or updated Elo.`,
     inputSchema: {
       sport: z.string().min(1).describe("Sport"),
       action: z.enum(["ratings", "matchup", "record_result"]).optional().describe("Mode"),
@@ -1159,6 +1164,8 @@ Returns: Team ratings, matchup prediction with fair ML odds, or updated Elo.`,
       loser: z.string().optional().describe("Losing team (record_result)"),
       home_score: z.number().optional().describe("Home score"),
       away_score: z.number().optional().describe("Away score"),
+      home_rest: z.string().optional().describe("Home rest status: back_to_back, 3_in_4, 4_in_5, well_rested_3plus, short_week, long_week"),
+      away_rest: z.string().optional().describe("Away rest status"),
     },
     annotations: {
       readOnlyHint: false,
@@ -1442,6 +1449,96 @@ Returns: Comprehensive daily briefing with all sections.`,
 );
 
 // ═════════════════════════════════════════════════════════════════════════════
+// TOOL 28: Alternate Lines Value Scanner
+// ═════════════════════════════════════════════════════════════════════════════
+
+server.registerTool(
+  "scan_alternate_lines",
+  {
+    title: "Alternate Lines Value Scanner",
+    description: `Scan alternate spreads and totals for +EV opportunities that main lines miss.
+Compares each book's alternate lines against Pinnacle (sharpest benchmark) to find mispriced lines.
+
+Args:
+  - sport (string): nfl, nba, mlb, nhl, ncaaf, ncaab
+  - market (optional): "spreads" | "totals" | "both" (default: both)
+  - min_ev (optional number): Minimum EV% to include (default: 3)
+
+Returns: List of +EV alternate lines with book, odds, Pinnacle equivalent, and EV%.`,
+    inputSchema: {
+      sport: z.string().min(1).describe("Sport"),
+      market: z.enum(["spreads", "totals", "both"]).optional().describe("Market to scan"),
+      min_ev: z.number().optional().describe("Minimum EV% threshold (default 3)"),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  async (params) => {
+    try {
+      const result = await scanAlternateLines(params);
+      const text = truncateIfNeeded(JSON.stringify(result, null, 2));
+      return { content: [{ type: "text", text }] };
+    } catch (error) {
+      return {
+        isError: true,
+        content: [
+          { type: "text", text: error instanceof Error ? error.message : String(error) },
+        ],
+      };
+    }
+  }
+);
+
+// ═════════════════════════════════════════════════════════════════════════════
+// TOOL 29: CLV Leaderboard
+// ═════════════════════════════════════════════════════════════════════════════
+
+server.registerTool(
+  "clv_leaderboard",
+  {
+    title: "CLV Leaderboard",
+    description: `Rank your bets by Closing Line Value — the #1 indicator of sharp betting skill.
+Shows which sports, bet types, and books consistently produce +CLV.
+
+Args:
+  - group_by (optional): "sport" | "bet_type" | "book" | "all" (default: all)
+  - days (optional number): Lookback period in days (default: 30)
+  - min_bets (optional number): Minimum bets to include a category (default: 3)
+
+Returns: CLV rankings by sport/type/book, top individual bets, and CLV-vs-results correlation analysis.`,
+    inputSchema: {
+      group_by: z.enum(["sport", "bet_type", "book", "all"]).optional().describe("Grouping dimension"),
+      days: z.number().optional().describe("Lookback days (default 30)"),
+      min_bets: z.number().optional().describe("Min bets per category (default 3)"),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  async (params) => {
+    try {
+      const result = await getCLVLeaderboard(params);
+      const text = truncateIfNeeded(JSON.stringify(result, null, 2));
+      return { content: [{ type: "text", text }] };
+    } catch (error) {
+      return {
+        isError: true,
+        content: [
+          { type: "text", text: error instanceof Error ? error.message : String(error) },
+        ],
+      };
+    }
+  }
+);
+
+// ═════════════════════════════════════════════════════════════════════════════
 // HTTP Server + MCP Transport
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -1518,7 +1615,7 @@ async function startServer(): Promise<void> {
       server: process.env.MCP_SERVER_NAME ?? "betting-intelligence",
       version: "1.0.0",
       timestamp: new Date().toISOString(),
-      tools: 26,
+      tools: 29,
     });
   });
 
@@ -1563,7 +1660,7 @@ async function startServer(): Promise<void> {
 ║  Betting Intelligence MCP Server                         ║
 ║  Running on http://0.0.0.0:${port}/mcp                      ║
 ║  Health check: http://0.0.0.0:${port}/health                ║
-║  Tools: 27 registered                                    ║
+║  Tools: 29 registered                                    ║
 ║  Transport: Streamable HTTP (stateless JSON)             ║
 ║  Background: line snapshots, auto-alerts, auto-CLV       ║
 ╚══════════════════════════════════════════════════════════╝

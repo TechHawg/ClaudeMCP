@@ -32,6 +32,10 @@ interface MatchupPrediction {
   fair_away_ml: number;
   elo_edge_home: number; // elo difference
   home_field_advantage: number;
+  rest_adjustments?: {
+    home: string;
+    away: string;
+  };
   recommendation: string;
 }
 
@@ -62,12 +66,41 @@ const HOME_ADVANTAGE: Record<string, number> = {
   ncaab: 65,
 };
 
+// Rest-day adjustments (Elo points)
+const REST_ADJUSTMENTS: Record<string, Record<string, number>> = {
+  nba: {
+    back_to_back: -40,      // B2B penalty (~2 points)
+    "3_in_4": -25,          // 3 games in 4 nights
+    "4_in_5": -55,          // 4 games in 5 nights — severe fatigue
+    well_rested_3plus: 15,  // 3+ days rest bonus
+  },
+  nhl: {
+    back_to_back: -30,
+    "3_in_4": -20,
+    "4_in_5": -45,
+    well_rested_3plus: 10,
+  },
+  nfl: {
+    short_week: -25,        // Thursday game after Sunday
+    long_week: 15,          // Coming off bye week
+    well_rested_3plus: 10,
+  },
+  mlb: {
+    back_to_back: 0,        // Normal in MLB
+    "3_in_4": 0,
+    day_after_night: -10,   // Day game after night game
+    well_rested_3plus: 5,
+  },
+};
+
 // ── Implementation ───────────────────────────────────────────────────────────
 
 export async function getPowerRatings(params: {
   sport: string;
   home_team?: string;
   away_team?: string;
+  home_rest?: string;
+  away_rest?: string;
   action?: string; // "ratings" | "matchup" | "record_result"
   winner?: string;
   loser?: string;
@@ -82,7 +115,7 @@ export async function getPowerRatings(params: {
   }
 
   if (action === "matchup" && params.home_team && params.away_team) {
-    return getMatchupPrediction(sport, params.home_team, params.away_team);
+    return getMatchupPrediction(sport, params.home_team, params.away_team, params.home_rest, params.away_rest);
   }
 
   return getTeamRatings(sport);
@@ -128,7 +161,9 @@ async function getTeamRatings(sport: string): Promise<RatingsResult> {
 async function getMatchupPrediction(
   sport: string,
   homeTeam: string,
-  awayTeam: string
+  awayTeam: string,
+  homeRest?: string,
+  awayRest?: string
 ): Promise<RatingsResult> {
   let homeElo = DEFAULT_ELO;
   let awayElo = DEFAULT_ELO;
@@ -147,8 +182,14 @@ async function getMatchupPrediction(
   }
 
   const hfa = HOME_ADVANTAGE[sport] ?? 50;
-  const homeAdj = homeElo + hfa;
-  const eloDiff = homeAdj - awayElo;
+
+  // Apply rest-day adjustments
+  const restAdj = REST_ADJUSTMENTS[sport] ?? {};
+  const homeRestAdj = homeRest ? (restAdj[homeRest] ?? 0) : 0;
+  const awayRestAdj = awayRest ? (restAdj[awayRest] ?? 0) : 0;
+  const homeAdj = homeElo + hfa + homeRestAdj;
+  const awayAdj = awayElo + awayRestAdj;
+  const eloDiff = homeAdj - awayAdj;
 
   // Elo expected score: E = 1 / (1 + 10^(-diff/400))
   const homeWinProb = new Decimal(1).div(
@@ -187,6 +228,10 @@ async function getMatchupPrediction(
       fair_away_ml: fairAwayMl,
       elo_edge_home: eloDiff,
       home_field_advantage: hfa,
+      rest_adjustments: {
+        home: homeRest ? `${homeRest} (${homeRestAdj > 0 ? '+' : ''}${homeRestAdj} Elo)` : "normal",
+        away: awayRest ? `${awayRest} (${awayRestAdj > 0 ? '+' : ''}${awayRestAdj} Elo)` : "normal",
+      },
       recommendation,
     },
     message: `${homeTeam} (${homeElo}) vs ${awayTeam} (${awayElo}). With HFA (+${hfa}): ${homeTeam} ${homeWinPct}% / ${awayTeam} ${awayWinPct}%.`,

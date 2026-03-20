@@ -44,6 +44,12 @@ export function startBackgroundServices(): void {
     console.error("[Background] No DATABASE_URL — CLV auto-capture disabled");
   }
 
+  // 4. Opening line capture every 30 minutes (DB required)
+  if (isDatabaseConfigured()) {
+    runOpeningLineCapture();
+    intervals.push(setInterval(runOpeningLineCapture, 30 * 60 * 1000));
+  }
+
   console.error("[Background] All services started");
 }
 
@@ -162,6 +168,84 @@ async function runClvCapture(): Promise<void> {
     }
   } catch (error) {
     console.error("[CLVCapture] Cycle error:", error);
+  }
+}
+
+// ── Opening Line Capture ────────────────────────────────────────────────────
+
+async function runOpeningLineCapture(): Promise<void> {
+  try {
+    if (!isDatabaseConfigured()) return;
+
+    for (const sport of SNAPSHOT_SPORTS) {
+      try {
+        const games: GameOdds[] = await getLiveOdds({ sport });
+        for (const game of games) {
+          const gameId = (game as unknown as Record<string, unknown>).id as string;
+          if (!gameId) continue;
+
+          // Check if we already have opening lines for this game
+          const existing = await query(
+            `SELECT id FROM opening_lines WHERE game_id = $1 LIMIT 1`,
+            [gameId]
+          );
+          if (existing && (existing as unknown[]).length > 0) continue;
+
+          // Store Pinnacle opening line (most accurate benchmark)
+          const pinnacle = game.pinnacle_line;
+          if (pinnacle) {
+            for (const outcome of pinnacle.outcomes) {
+              await query(
+                `INSERT INTO opening_lines (game_id, sport, game, book, market, side, odds, line, captured_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+                 ON CONFLICT (game_id, book, market, side) DO NOTHING`,
+                [
+                  gameId,
+                  sport,
+                  `${game.away_team} @ ${game.home_team}`,
+                  "pinnacle",
+                  "h2h",
+                  outcome.name,
+                  outcome.price,
+                  outcome.point ?? null,
+                ]
+              );
+            }
+          }
+
+          // Also store consensus opening (first available book)
+          const firstBook = (game as unknown as Record<string, unknown>).bookmakers as Array<Record<string, unknown>> | undefined;
+          if (firstBook?.[0]) {
+            const bm = firstBook[0];
+            const markets = bm.markets as Array<Record<string, unknown>> | undefined;
+            const outcomes = markets?.[0]?.outcomes as Array<Record<string, unknown>> ?? [];
+            for (const outcome of outcomes) {
+              await query(
+                `INSERT INTO opening_lines (game_id, sport, game, book, market, side, odds, line, captured_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+                 ON CONFLICT (game_id, book, market, side) DO NOTHING`,
+                [
+                  gameId,
+                  sport,
+                  `${game.away_team} @ ${game.home_team}`,
+                  String(bm.key ?? "consensus"),
+                  "h2h",
+                  String(outcome.name),
+                  Number(outcome.price ?? 0),
+                  outcome.point ?? null,
+                ]
+              );
+            }
+          }
+        }
+        await sleep(2000);
+      } catch (err) {
+        console.error(`[OpeningLines] ${sport} failed:`, err);
+      }
+    }
+    console.error("[OpeningLines] Capture complete");
+  } catch (error) {
+    console.error("[OpeningLines] Cycle error:", error);
   }
 }
 

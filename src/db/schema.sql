@@ -122,3 +122,39 @@ CREATE TABLE IF NOT EXISTS alerts (
 
 CREATE INDEX IF NOT EXISTS idx_alerts_active ON alerts(active);
 CREATE INDEX IF NOT EXISTS idx_alerts_sport ON alerts(sport);
+
+-- ── Opening Lines: first-captured odds for each game ────────────────────────
+CREATE TABLE IF NOT EXISTS opening_lines (
+  id              SERIAL PRIMARY KEY,
+  game_id         VARCHAR(200) NOT NULL,
+  sport           VARCHAR(50) NOT NULL,
+  game            VARCHAR(200) NOT NULL,
+  book            VARCHAR(100) NOT NULL,
+  market          VARCHAR(50) NOT NULL,
+  side            VARCHAR(100) NOT NULL,
+  odds            INTEGER NOT NULL,
+  line            NUMERIC(10,2),
+  captured_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(game_id, book, market, side)
+);
+
+CREATE INDEX IF NOT EXISTS idx_opening_lines_game ON opening_lines(game_id);
+CREATE INDEX IF NOT EXISTS idx_opening_lines_sport ON opening_lines(sport);
+
+-- ── Prop Hit Rate: tracks prop bet outcomes over time ───────────────────────
+CREATE TABLE IF NOT EXISTS prop_hit_rates (
+  id              SERIAL PRIMARY KEY,
+  player_name     VARCHAR(200) NOT NULL,
+  sport           VARCHAR(50) NOT NULL,
+  market          VARCHAR(50) NOT NULL,
+  line            NUMERIC(10,2) NOT NULL,
+  actual_value    NUMERIC(10,2),
+  hit             BOOLEAN,          -- true = over hit, false = under hit
+  game_date       DATE NOT NULL,
+  game            VARCHAR(200),
+  recorded_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_prop_hits_player ON prop_hit_rates(player_name);
+CREATE INDEX IF NOT EXISTS idx_prop_hits_sport ON prop_hit_rates(sport, market);
+CREATE INDEX IF NOT EXISTS idx_prop_hits_date ON prop_hit_rates(game_date);

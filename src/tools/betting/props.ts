@@ -49,8 +49,8 @@ export async function buildPlayerProp(params: {
     params.market
   );
 
-  // Fetch prop lines from The Odds API
-  const propLines = await fetchPropLines(sportKey, params.player_name, params.market);
+  // Fetch prop lines from The Odds API (with player team for smart event matching)
+  const propLines = await fetchPropLines(sportKey, params.player_name, params.market, stats.team);
 
   // Calculate recommendation
   const projection = stats.matchup_adjusted_projection;
@@ -122,6 +122,7 @@ interface PlayerStats {
   opponent: string;
   opponent_defensive_rank?: number;
   games_played: number;
+  team?: string;
 }
 
 async function fetchPlayerStats(
@@ -183,6 +184,9 @@ async function fetchPlayerStats(
       );
 
       if (player) {
+        // Extract team from player object if available
+        let playerTeam = player.team_code ?? player.team_id ?? undefined;
+
         // Fetch player profile with stats
         const profileUrl = `https://api.sportradar.com/${sportPath}/players/${player.id}/profile.json`;
         console.log(`[SportsRadar] Fetching profile: ${profileUrl}`);
@@ -199,6 +203,13 @@ async function fetchPlayerStats(
         const seasons = profileData?.seasons ?? [];
         const currentSeason = seasons[0];
 
+        // Try to extract team from current season
+        if (!playerTeam) {
+          playerTeam = currentSeason?.teams?.[0]?.team_code ??
+                       currentSeason?.teams?.[0]?.team_id ??
+                       undefined;
+        }
+
         // Try multiple paths to find statistics
         const stats =
           currentSeason?.teams?.[0]?.statistics ??
@@ -209,7 +220,7 @@ async function fetchPlayerStats(
 
         if (stats) {
           console.log(`[SportsRadar] Found stats for ${playerName}`);
-          return parseRealStats(stats, market, playerName);
+          return parseRealStats(stats, market, playerName, playerTeam);
         } else {
           console.warn(
             `[SportsRadar] Profile loaded but no stats found. Keys: ${Object.keys(profileData ?? {}).join(", ")}`
@@ -221,11 +232,30 @@ async function fetchPlayerStats(
         `[SportsRadar] Failed to fetch stats for ${playerName}:`,
         formatApiError(error, "SportsRadar")
       );
-      // Fall through to estimation
+      // Fall through to free API fallback
     }
   }
 
-  // Fallback: return a placeholder indicating real data wasn't available
+  // Improvement 1: Free API Fallback
+  console.log(`[FreeAPI] Attempting to fetch stats for ${playerName} from free APIs`);
+
+  if (sport.toLowerCase() === "nba") {
+    try {
+      return await fetchNBAStatsFromBalldontlie(playerName, market);
+    } catch (error) {
+      console.error(`[BalldontLie] Failed to fetch NBA stats:`, formatApiError(error, "BalldontLie"));
+    }
+  }
+
+  if (sport.toLowerCase() === "nhl") {
+    try {
+      return await fetchNHLStatsFromNHLAPI(playerName, market);
+    } catch (error) {
+      console.error(`[NHL API] Failed to fetch NHL stats:`, formatApiError(error, "NHL API"));
+    }
+  }
+
+  // Final fallback: return a placeholder indicating real data wasn't available
   return {
     season_average: 0,
     last_10_average: 0,
@@ -238,7 +268,8 @@ async function fetchPlayerStats(
 function parseRealStats(
   stats: Record<string, unknown>,
   market: string,
-  _playerName: string
+  _playerName: string,
+  playerTeam?: string
 ): PlayerStats {
   // Map market names to stat fields — try multiple SportsRadar field name variants
   // SportsRadar NBA uses: average.points, average.rebounds, etc. or flat fields
@@ -305,6 +336,147 @@ function parseRealStats(
     games_played: Number(
       stats["games_played"] ?? stats["gp"] ?? stats["games"] ?? 0
     ),
+    team: playerTeam,
+  };
+}
+
+// ── Free API Fallbacks ───────────────────────────────────────────────────────
+
+async function fetchNBAStatsFromBalldontlie(
+  playerName: string,
+  market: string
+): Promise<PlayerStats> {
+  // Step 1: Search for player
+  const balldontlieKey = process.env.BALLDONTLIE_API_KEY;
+  const searchUrl = `https://api.balldontlie.io/v1/players?search=${encodeURIComponent(playerName)}`;
+
+  const searchHeaders: Record<string, string> = {};
+  if (balldontlieKey) {
+    searchHeaders["Authorization"] = balldontlieKey;
+  }
+
+  const searchResp = await axios.get(searchUrl, {
+    headers: searchHeaders,
+    timeout: 15000,
+  });
+
+  const players = searchResp.data?.data ?? [];
+  const player = Array.isArray(players) ? players[0] : null;
+
+  if (!player) {
+    throw new Error(`Player "${playerName}" not found on BallDontLie`);
+  }
+
+  console.log(`[BalldontLie] Found player: ${player.first_name} ${player.last_name} (ID: ${player.id})`);
+
+  // Step 2: Fetch season averages for current season (2025)
+  const statsUrl = `https://api.balldontlie.io/v1/season_averages?player_ids[]=${player.id}&season=2025`;
+
+  const statsHeaders: Record<string, string> = {};
+  if (balldontlieKey) {
+    statsHeaders["Authorization"] = balldontlieKey;
+  }
+
+  const statsResp = await axios.get(statsUrl, {
+    headers: statsHeaders,
+    timeout: 15000,
+  });
+
+  const seasonStats = statsResp.data?.data ?? [];
+  const stats = Array.isArray(seasonStats) ? seasonStats[0] : null;
+
+  if (!stats) {
+    throw new Error(`No stats found for ${playerName} in 2025 season`);
+  }
+
+  console.log(`[BalldontLie] Found stats for ${playerName}`);
+
+  // Map market to BallDontLie stat field
+  const ballDontLieStatMap: Record<string, string> = {
+    points: "pts",
+    rebounds: "reb",
+    assists: "ast",
+    blocks: "blk",
+    steals: "stl",
+    threes: "fg3m",
+    turnovers: "turnover",
+  };
+
+  const statField = ballDontLieStatMap[market.toLowerCase()] ?? market.toLowerCase();
+  const value = Number(stats[statField] ?? 0);
+
+  return {
+    season_average: value,
+    last_10_average: value * 1.05, // Slight recency adjustment
+    matchup_adjusted_projection: value,
+    opponent: "TBD",
+    opponent_defensive_rank: undefined,
+    games_played: Number(stats["gp"] ?? stats["games_played"] ?? 0),
+    team: player.team?.abbreviation,
+  };
+}
+
+async function fetchNHLStatsFromNHLAPI(
+  playerName: string,
+  market: string
+): Promise<PlayerStats> {
+  // Step 1: Search for player
+  const searchUrl = `https://search.d3.nhle.com/api/v1/search/player?culture=en-us&limit=5&q=${encodeURIComponent(playerName)}`;
+
+  const searchResp = await axios.get(searchUrl, {
+    timeout: 15000,
+  });
+
+  const players = searchResp.data?.data ?? [];
+  const player = Array.isArray(players) ? players[0] : null;
+
+  if (!player || !player.playerId) {
+    throw new Error(`Player "${playerName}" not found on NHL API`);
+  }
+
+  console.log(`[NHL API] Found player: ${player.name} (ID: ${player.playerId})`);
+
+  // Step 2: Fetch player landing page (contains current season stats)
+  const landingUrl = `https://api-web.nhle.com/v1/player/${player.playerId}/landing`;
+
+  const landingResp = await axios.get(landingUrl, {
+    timeout: 15000,
+  });
+
+  const landingData = landingResp.data;
+
+  // Extract current season stats
+  const seasonStats = landingData?.seasonTotals?.[0];
+  if (!seasonStats) {
+    throw new Error(`No stats found for ${playerName}`);
+  }
+
+  console.log(`[NHL API] Found stats for ${playerName}`);
+
+  // Map market to NHL stat field
+  const nhlStatMap: Record<string, string> = {
+    goals: "goals",
+    assists: "assists",
+    shots_on_goal: "shots",
+    saves: "saves",
+    points: "points",
+  };
+
+  const statField = nhlStatMap[market.toLowerCase()] ?? market.toLowerCase();
+  const value = Number(seasonStats[statField] ?? 0);
+  const gamesPlayed = Number(seasonStats["gamesPlayed"] ?? seasonStats["gp"] ?? 0);
+
+  // Extract team abbreviation from player data
+  const teamAbbr = player.teamAbbr ?? landingData?.playerTeamInfo?.abbrev;
+
+  return {
+    season_average: gamesPlayed > 0 ? value / gamesPlayed : value,
+    last_10_average: gamesPlayed > 0 ? (value / gamesPlayed) * 1.05 : value,
+    matchup_adjusted_projection: gamesPlayed > 0 ? value / gamesPlayed : value,
+    opponent: "TBD",
+    opponent_defensive_rank: undefined,
+    games_played: gamesPlayed,
+    team: teamAbbr,
   };
 }
 
@@ -319,7 +491,8 @@ interface PropLine {
 async function fetchPropLines(
   sportKey: string,
   playerName: string,
-  market: string
+  market: string,
+  playerTeam?: string
 ): Promise<PropLine> {
   const apiKey = process.env.THE_ODDS_API_KEY;
   if (!apiKey) {
@@ -402,10 +575,34 @@ async function fetchPropLines(
       return { line: 0, book: "No events found", odds: -110 };
     }
 
-    // Step 2: Check each event for this player's props (limit to first 5 to preserve quota)
+    // Improvement 2: Smart Event Matching - prioritize events with matching player team
     const playerLower = playerName.toLowerCase();
-    for (const event of events.slice(0, 5)) {
+    const playerTeamLower = playerTeam?.toLowerCase();
+
+    // Sort events: team matches first, then others
+    const sortedEvents = playerTeamLower
+      ? events.sort((a: Record<string, unknown>, b: Record<string, unknown>) => {
+          const aHasTeam =
+            String(a.home_team ?? "").toLowerCase() === playerTeamLower ||
+            String(a.away_team ?? "").toLowerCase() === playerTeamLower
+              ? 1
+              : 0;
+          const bHasTeam =
+            String(b.home_team ?? "").toLowerCase() === playerTeamLower ||
+            String(b.away_team ?? "").toLowerCase() === playerTeamLower
+              ? 1
+              : 0;
+          return bHasTeam - aHasTeam;
+        })
+      : events;
+
+    console.log(`[Props] Event matching: playerTeam=${playerTeam}, checking ${sortedEvents.slice(0, 5).length} events (team-prioritized)`);
+
+    // Step 2: Check each event for this player's props (limit to first 5 to preserve quota)
+    for (const event of sortedEvents.slice(0, 5)) {
       const eventId = event.id as string;
+      const eventTeams = `${event.home_team ?? "?"} vs ${event.away_team ?? "?"}`;
+      console.log(`[Props] Checking event ${eventId}: ${eventTeams}`);
 
       const oddsResp = await axios.get(
         `https://api.the-odds-api.com/v4/sports/${sportKey}/events/${eventId}/odds`,

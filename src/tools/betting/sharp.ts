@@ -135,58 +135,104 @@ function analyzeLineMovement(
   const bookmakers = game.bookmakers as Array<Record<string, unknown>>;
   if (!bookmakers || bookmakers.length < 3) return null;
 
-  // Count which side has better odds at sharp books vs public books
-  const sharpBooks = ["pinnacle", "betcris", "betonline"];
-  const publicBooks = ["draftkings", "fanduel", "betmgm", "caesars"];
+  const sharpBookKeys = ["pinnacle", "betcris", "betonline", "bookmaker"];
+  const publicBookKeys = ["draftkings", "fanduel", "betmgm", "caesars", "pointsbet", "unibet"];
 
-  let sharpHomeCount = 0;
-  let publicHomeCount = 0;
+  // Collect actual odds from sharp vs public books
+  const sharpOdds: { home: number; away: number }[] = [];
+  const publicOdds: { home: number; away: number }[] = [];
 
   for (const bm of bookmakers) {
-    const bookKey = (bm.bookmaker as string).toLowerCase();
-    const outcomes = bm.outcomes as Array<Record<string, unknown>>;
+    const bookKey = String(bm.key ?? bm.bookmaker ?? "").toLowerCase();
+    const markets = bm.markets as Array<Record<string, unknown>> | undefined;
+    const outcomes = markets?.[0]?.outcomes as Array<Record<string, unknown>> ??
+      bm.outcomes as Array<Record<string, unknown>>;
     if (!outcomes || outcomes.length < 2) continue;
 
-    const homeOdds = outcomes.find(
-      (o) => (o.name as string) === homeTeam
-    );
-    const awayOdds = outcomes.find(
-      (o) => (o.name as string) === awayTeam
-    );
+    const homeOdds = outcomes.find((o) => (o.name as string) === homeTeam);
+    const awayOdds = outcomes.find((o) => (o.name as string) === awayTeam);
     if (!homeOdds || !awayOdds) continue;
 
-    const homeFavored =
-      Math.abs(homeOdds.price as number) < Math.abs(awayOdds.price as number);
+    const homePrice = Number(homeOdds.price ?? homeOdds.point ?? 0);
+    const awayPrice = Number(awayOdds.price ?? awayOdds.point ?? 0);
+    if (homePrice === 0 || awayPrice === 0) continue;
 
-    if (sharpBooks.includes(bookKey) && homeFavored) sharpHomeCount++;
-    if (publicBooks.includes(bookKey) && homeFavored) publicHomeCount++;
+    if (sharpBookKeys.includes(bookKey)) {
+      sharpOdds.push({ home: homePrice, away: awayPrice });
+    }
+    if (publicBookKeys.includes(bookKey)) {
+      publicOdds.push({ home: homePrice, away: awayPrice });
+    }
   }
 
-  const sharpSide =
-    sharpHomeCount > publicHomeCount ? homeTeam : awayTeam;
-  const publicSide =
-    publicHomeCount >= sharpHomeCount ? homeTeam : awayTeam;
-  const rlm = sharpSide !== publicSide;
+  if (sharpOdds.length === 0 || publicOdds.length === 0) return null;
 
-  // Simple steam detection: if multiple books moved in the same direction recently
-  const steamAlert = rlm; // RLM is the strongest single sharp signal
+  // Calculate average implied probability for each side at sharp vs public books
+  const avgSharpHome = sharpOdds.reduce((s, o) => s + oddsToImplied(o.home), 0) / sharpOdds.length;
+  const avgPublicHome = publicOdds.reduce((s, o) => s + oddsToImplied(o.home), 0) / publicOdds.length;
+  const avgSharpAway = sharpOdds.reduce((s, o) => s + oddsToImplied(o.away), 0) / sharpOdds.length;
+  const avgPublicAway = publicOdds.reduce((s, o) => s + oddsToImplied(o.away), 0) / publicOdds.length;
+
+  // Sharp lean: which side do sharp books price as MORE likely than public books?
+  // If sharp books give home a HIGHER implied prob than public books → sharps lean home
+  const sharpHomeBias = avgSharpHome - avgPublicHome; // positive = sharps lean home more than public
+  const THRESHOLD = 0.015; // 1.5% implied prob difference required
+
+  // Determine sides
+  let sharpSide: string;
+  let publicSide: string;
+  let rlm = false;
+
+  if (Math.abs(sharpHomeBias) < THRESHOLD) {
+    // No meaningful disagreement between sharp and public books
+    sharpSide = avgSharpHome > 0.5 ? homeTeam : awayTeam;
+    publicSide = sharpSide;
+  } else if (sharpHomeBias > 0) {
+    // Sharps lean home more than public
+    sharpSide = homeTeam;
+    publicSide = awayTeam;
+    rlm = true;
+  } else {
+    // Sharps lean away more than public
+    sharpSide = awayTeam;
+    publicSide = homeTeam;
+    rlm = true;
+  }
+
+  // Steam detection: check if 3+ sharp books agree on a side with tight clustering
+  const sharpHomeImplied = sharpOdds.map(o => oddsToImplied(o.home));
+  const sharpSpread = sharpHomeImplied.length > 1
+    ? Math.max(...sharpHomeImplied) - Math.min(...sharpHomeImplied)
+    : 1;
+  const steamAlert = rlm && sharpOdds.length >= 2 && sharpSpread < 0.03; // tight clustering among sharps
+
+  // Estimate public/sharp split from divergence magnitude (not hardcoded)
+  const divergenceMagnitude = Math.abs(sharpHomeBias);
+  const estimatedPublicPct = Math.min(75, Math.round(50 + divergenceMagnitude * 400));
+  const estimatedSharpPct = Math.min(80, Math.round(50 + divergenceMagnitude * 500));
 
   return {
     game: `${awayTeam} @ ${homeTeam}`,
     sport: game.sport as string,
     public_side: publicSide,
-    public_pct: 55, // estimated without ActionNetwork data
+    public_pct: rlm ? estimatedPublicPct : 50,
     sharp_side: sharpSide,
-    sharp_pct: 60, // estimated
+    sharp_pct: rlm ? estimatedSharpPct : 50,
     line_movement_summary: rlm
-      ? `Reverse line movement detected: public on ${publicSide}, but line moving toward ${sharpSide}`
-      : `Line movement aligns with public sentiment on ${publicSide}`,
+      ? `Sharp/public divergence: sharps price ${sharpSide} ${(divergenceMagnitude * 100).toFixed(1)}% higher than public books. Possible RLM signal.`
+      : `No significant sharp/public divergence (${(divergenceMagnitude * 100).toFixed(1)}% diff, threshold 1.5%).`,
     reverse_line_movement: rlm,
     steam_move_alert: steamAlert,
     steam_details: steamAlert
-      ? "Multiple sharp books adjusted odds simultaneously — strong sharp signal."
+      ? `${sharpOdds.length} sharp books clustered within ${(sharpSpread * 100).toFixed(1)}% implied prob — coordinated sharp move on ${sharpSide}.`
       : undefined,
     data_source: "LineMovementAnalysis",
     cached_at: new Date().toISOString(),
   };
+}
+
+// Helper: convert American odds to implied probability (0-1 range)
+function oddsToImplied(american: number): number {
+  if (american > 0) return 100 / (american + 100);
+  return Math.abs(american) / (Math.abs(american) + 100);
 }
