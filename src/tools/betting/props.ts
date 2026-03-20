@@ -157,32 +157,63 @@ async function fetchPlayerStats(
         };
       }
 
-      // Search for player
-      const searchResp = await axios.get(
-        `https://api.sportradar.com/${sportPath}/players/search.json`,
-        {
-          params: { api_key: apiKey, q: playerName },
-          timeout: 15000,
-        }
+      // Search for player — SportsRadar API structure varies by sport
+      // NBA v8: GET /nba/trial/v8/en/players/search/{query}.json
+      // MLB v7: GET /mlb/trial/v7/en/players/search/{query}.json
+      const encodedName = encodeURIComponent(playerName);
+      const searchUrl = `https://api.sportradar.com/${sportPath}/players/search/${encodedName}.json`;
+      console.log(`[SportsRadar] Searching: ${searchUrl}`);
+
+      const searchResp = await axios.get(searchUrl, {
+        params: { api_key: apiKey },
+        timeout: 15000,
+      });
+
+      // Response structure: { players: [...] } or { results: [...] } or { search: { players: [...] } }
+      const players =
+        searchResp.data?.players ??
+        searchResp.data?.results ??
+        searchResp.data?.search?.players ??
+        [];
+      const player = Array.isArray(players) ? players[0] : null;
+
+      console.log(
+        `[SportsRadar] Search returned ${Array.isArray(players) ? players.length : 0} players` +
+        (player ? ` — matched: ${player.full_name ?? player.name ?? player.id}` : " — no match")
       );
 
-      const player = searchResp.data?.players?.[0];
       if (player) {
         // Fetch player profile with stats
-        const profileResp = await axios.get(
-          `https://api.sportradar.com/${sportPath}/players/${player.id}/profile.json`,
-          {
-            params: { api_key: apiKey },
-            timeout: 15000,
-          }
-        );
+        const profileUrl = `https://api.sportradar.com/${sportPath}/players/${player.id}/profile.json`;
+        console.log(`[SportsRadar] Fetching profile: ${profileUrl}`);
 
-        const seasons = profileResp.data?.seasons ?? [];
+        const profileResp = await axios.get(profileUrl, {
+          params: { api_key: apiKey },
+          timeout: 15000,
+        });
+
+        // Profile response structure varies:
+        // NBA: { seasons: [{ teams: [{ statistics: {...} }] }] }
+        // Alternative: { statistics: {...} } or nested under player object
+        const profileData = profileResp.data;
+        const seasons = profileData?.seasons ?? [];
         const currentSeason = seasons[0];
-        const stats = currentSeason?.teams?.[0]?.statistics;
+
+        // Try multiple paths to find statistics
+        const stats =
+          currentSeason?.teams?.[0]?.statistics ??
+          currentSeason?.statistics ??
+          profileData?.statistics ??
+          profileData?.player?.statistics ??
+          null;
 
         if (stats) {
+          console.log(`[SportsRadar] Found stats for ${playerName}`);
           return parseRealStats(stats, market, playerName);
+        } else {
+          console.warn(
+            `[SportsRadar] Profile loaded but no stats found. Keys: ${Object.keys(profileData ?? {}).join(", ")}`
+          );
         }
       }
     } catch (error) {
@@ -209,18 +240,38 @@ function parseRealStats(
   market: string,
   _playerName: string
 ): PlayerStats {
-  // Map market names to stat fields (varies by sport)
+  // Map market names to stat fields — try multiple SportsRadar field name variants
+  // SportsRadar NBA uses: average.points, average.rebounds, etc. or flat fields
   const statMap: Record<string, string[]> = {
-    points: ["points_per_game", "avg_points"],
-    rebounds: ["rebounds_per_game", "avg_rebounds"],
-    assists: ["assists_per_game", "avg_assists"],
-    passing_yards: ["avg_pass_yards", "passing_yards_per_game"],
-    rushing_yards: ["avg_rush_yards", "rushing_yards_per_game"],
-    strikeouts: ["avg_strikeouts", "strikeouts_per_game"],
+    // NBA
+    points: ["points_per_game", "avg_points", "points", "ppg"],
+    rebounds: ["rebounds_per_game", "avg_rebounds", "rebounds", "rpg"],
+    assists: ["assists_per_game", "avg_assists", "assists", "apg"],
+    threes: ["three_points_made_per_game", "avg_three_points_made", "three_points_made"],
+    blocks: ["blocks_per_game", "avg_blocks", "blocks"],
+    steals: ["steals_per_game", "avg_steals", "steals"],
+    turnovers: ["turnovers_per_game", "avg_turnovers", "turnovers"],
+    // NFL
+    passing_yards: ["avg_pass_yards", "passing_yards_per_game", "pass_yards", "passing_yards"],
+    pass_yards: ["avg_pass_yards", "passing_yards_per_game", "pass_yards", "passing_yards"],
+    rushing_yards: ["avg_rush_yards", "rushing_yards_per_game", "rush_yards", "rushing_yards"],
+    rush_yards: ["avg_rush_yards", "rushing_yards_per_game", "rush_yards", "rushing_yards"],
+    receiving_yards: ["avg_receiving_yards", "receiving_yards_per_game", "receiving_yards"],
+    receptions: ["receptions_per_game", "avg_receptions", "receptions"],
+    // MLB
+    strikeouts: ["avg_strikeouts", "strikeouts_per_game", "strikeouts", "k_per_9"],
+    hits: ["avg_hits", "hits_per_game", "hits", "batting_average"],
+    home_runs: ["home_runs", "hr", "avg_home_runs"],
+    // NHL
+    goals: ["goals_per_game", "avg_goals", "goals"],
+    shots_on_goal: ["shots_per_game", "avg_shots", "shots_on_goal", "shots"],
+    saves: ["saves_per_game", "avg_saves", "saves"],
   };
 
   const keys = statMap[market.toLowerCase()] ?? [market];
   let value = 0;
+
+  // First try flat stats object
   for (const k of keys) {
     if (stats[k] != null) {
       value = Number(stats[k]);
@@ -228,12 +279,32 @@ function parseRealStats(
     }
   }
 
+  // If not found, try nested "average" or "total" objects (SportsRadar nests stats)
+  if (value === 0) {
+    const avgObj = stats["average"] as Record<string, unknown> | undefined;
+    const totalObj = stats["total"] as Record<string, unknown> | undefined;
+    for (const k of keys) {
+      if (avgObj?.[k] != null) {
+        value = Number(avgObj[k]);
+        break;
+      }
+      if (totalObj?.[k] != null) {
+        value = Number(totalObj[k]);
+        break;
+      }
+    }
+  }
+
+  console.log(`[SportsRadar] Parsed ${market} stat = ${value} (tried keys: ${keys.join(", ")})`);
+
   return {
     season_average: value,
     last_10_average: value * 1.02, // Slight recency adjustment
     matchup_adjusted_projection: value,
     opponent: "TBD",
-    games_played: Number(stats["games_played"] ?? 0),
+    games_played: Number(
+      stats["games_played"] ?? stats["gp"] ?? stats["games"] ?? 0
+    ),
   };
 }
 
@@ -261,19 +332,60 @@ async function fetchPropLines(
   // Each event-level call costs extra quota, so we iterate cautiously.
 
   // Map user-friendly market to Odds API props market key
+  // See: https://the-odds-api.com/sports-odds-data/betting-markets.html
+  // NBA/NCAAB/WNBA: player_points, player_rebounds, player_assists, player_threes, etc.
+  // NFL: player_pass_yds, player_rush_yds, player_reception_yds, etc.
+  // MLB: batter_hits, batter_home_runs, pitcher_strikeouts (note: batter_/pitcher_ prefix!)
+  // NHL: player_points, player_goals, player_assists, player_shots_on_goal
   const propsMarketMap: Record<string, string> = {
-    points: "player_points_over_under",
-    rebounds: "player_rebounds_over_under",
-    assists: "player_assists_over_under",
-    passing_yards: "player_pass_yds_over_under",
-    rushing_yards: "player_rush_yds_over_under",
-    receiving_yards: "player_reception_yds_over_under",
-    strikeouts: "player_strikeouts_over_under",
-    hits: "player_hits_over_under",
-    threes: "player_threes_over_under",
+    // NBA / NCAAB
+    points: "player_points",
+    rebounds: "player_rebounds",
+    assists: "player_assists",
+    threes: "player_threes",
+    blocks: "player_blocks",
+    steals: "player_steals",
+    turnovers: "player_turnovers",
+    pra: "player_points_rebounds_assists",
+    "points+rebounds+assists": "player_points_rebounds_assists",
+    "points+rebounds": "player_points_rebounds",
+    "points+assists": "player_points_assists",
+    "rebounds+assists": "player_rebounds_assists",
+    double_double: "player_double_double",
+    triple_double: "player_triple_double",
+    // NFL
+    passing_yards: "player_pass_yds",
+    pass_yards: "player_pass_yds",
+    rushing_yards: "player_rush_yds",
+    rush_yards: "player_rush_yds",
+    receiving_yards: "player_reception_yds",
+    receptions: "player_receptions",
+    pass_tds: "player_pass_tds",
+    rush_tds: "player_rush_tds",
+    anytime_td: "player_anytime_td",
+    // MLB (note: batter_ and pitcher_ prefixes)
+    hits: "batter_hits",
+    home_runs: "batter_home_runs",
+    rbis: "batter_rbis",
+    total_bases: "batter_total_bases",
+    runs_scored: "batter_runs_scored",
+    strikeouts: "pitcher_strikeouts",
+    pitcher_strikeouts: "pitcher_strikeouts",
+    batter_strikeouts: "batter_strikeouts",
+    walks: "pitcher_walks",
+    // NHL
+    goals: "player_goals",
+    shots_on_goal: "player_shots_on_goal",
+    saves: "player_total_saves",
+    power_play_points: "player_power_play_points",
+    anytime_goal: "player_goal_scorer_anytime",
+    // Soccer
+    anytime_goal_scorer: "player_goal_scorer_anytime",
+    shots: "player_shots",
+    shots_on_target: "player_shots_on_target",
   };
 
-  const oddsMarket = propsMarketMap[market.toLowerCase()] ?? `player_${market.toLowerCase()}_over_under`;
+  const oddsMarket = propsMarketMap[market.toLowerCase()] ?? `player_${market.toLowerCase()}`;
 
   try {
     // Step 1: Get events for this sport
