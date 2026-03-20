@@ -3,7 +3,6 @@
  * Compares every book's line against Pinnacle and flags value opportunities.
  */
 
-import Decimal from "decimal.js";
 import { getLiveOdds, type GameOdds } from "./odds.js";
 import {
   americanToImpliedProb,
