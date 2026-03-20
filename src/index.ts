@@ -235,7 +235,7 @@ Returns: Value lines with rating (1-10), best book, EV%, Pinnacle reference.`,
     try {
       const result = await findValueLines(params);
       return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
       };
     } catch (error) {
       return {
@@ -281,7 +281,7 @@ Returns: Full prop card with over/under recommendation, confidence score, hit ra
     try {
       const result = await buildPlayerProp(params);
       return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
       };
     } catch (error) {
       return {
@@ -338,7 +338,7 @@ Returns: Combined odds, true probability, juice %, EV %, correlation warnings, r
     try {
       const result = buildParlay(params);
       return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
       };
     } catch (error) {
       return {
@@ -383,7 +383,7 @@ Returns: Any arb/middle opportunities with profit %, exact bet amounts.`,
     try {
       const result = await detectArbitrage(params);
       return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
       };
     } catch (error) {
       return {
@@ -430,7 +430,7 @@ Returns: List of +EV bets with fair odds, book odds, and EV percentage.`,
     try {
       const result = await getOddsJamPositiveEV(params);
       return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
       };
     } catch (error) {
       return {
@@ -482,7 +482,7 @@ Returns: Recommended bet in dollars, % of bankroll, risk assessment.`,
     try {
       const result = calculateKelly(params);
       return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
       };
     } catch (error) {
       return {
@@ -526,7 +526,7 @@ Returns: Sharp side, public side, line movement summary, steam move alerts.`,
     try {
       const result = await getSharpAction(params);
       return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
       };
     } catch (error) {
       return {
@@ -570,7 +570,7 @@ Returns: Weather data + betting impact assessment (e.g. "Wind 18mph — fade pas
     try {
       const result = await getWeather(params);
       return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
       };
     } catch (error) {
       return {
@@ -616,7 +616,7 @@ Returns: Injury list with status, position, line impact estimates.`,
     try {
       const result = await getInjuryReport(params);
       return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
       };
     } catch (error) {
       return {
@@ -665,7 +665,7 @@ Returns: Matching angles with historical ROI, sample size, combined angle score.
     try {
       const result = await getSituationalAngles(params);
       return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
       };
     } catch (error) {
       return {
@@ -731,7 +731,7 @@ Returns: bet_id for future CLV tracking and result recording.`,
         bet_type: params.bet_type ?? "unknown",
       });
       return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
       };
     } catch (error) {
       return {
@@ -775,7 +775,7 @@ Returns: CLV calculation with interpretation.`,
     try {
       const result = await recordCLV(params);
       return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
       };
     } catch (error) {
       return {
@@ -820,7 +820,7 @@ Returns: Confirmation.`,
     try {
       const result = await recordResult(params);
       return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
       };
     } catch (error) {
       return {
@@ -870,7 +870,7 @@ Returns: Full performance report with actionable insights.`,
     try {
       const result = await analyzePerformance(params);
       return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
       };
     } catch (error) {
       return {
@@ -912,7 +912,7 @@ Returns: Top 5 edge clusters with ROI, CLV, insight for each.`,
     try {
       const result = await identifyEdges(params);
       return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
       };
     } catch (error) {
       return {
@@ -971,7 +971,7 @@ Returns: Score 1-10, grade A+ through F, breakdown of each signal's contribution
     try {
       const result = getConfidenceScore(params);
       return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
       };
     } catch (error) {
       return {
@@ -1019,7 +1019,7 @@ Returns: Ranked list of every book's price, EV vs Pinnacle, best/worst book, rec
     try {
       const result = await shopLines(params);
       return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
       };
     } catch (error) {
       return {
@@ -1169,7 +1169,7 @@ Returns: Team ratings, matchup prediction with fair ML odds, or updated Elo.`,
     try {
       const result = await getPowerRatings(params);
       return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
       };
     } catch (error) {
       return {
@@ -1270,7 +1270,7 @@ Returns: Full bankroll status with drawdown %, period P&L, Kelly compliance rati
     try {
       const result = await manageBankroll(params);
       return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
       };
     } catch (error) {
       return {
@@ -1333,7 +1333,7 @@ Returns: Created alert, alert list, triggered results, or test confirmation.`,
     try {
       const result = await manageAlerts(params);
       return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
       };
     } catch (error) {
       return {
