@@ -43,8 +43,10 @@ import { queryLineHistory } from "./tools/betting/history.js";
 import { manageBankroll } from "./tools/learning/bankroll.js";
 import { manageAlerts } from "./tools/betting/alerts.js";
 import { getConsensusPicks } from "./tools/betting/consensus.js";
+import { getDailyDigest } from "./tools/betting/digest.js";
 import { truncateIfNeeded } from "./utils/helpers.js";
 import { initializeSchema, seedSituationalAngles } from "./db/client.js";
+import { startBackgroundServices } from "./services/background.js";
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Server Setup
@@ -1393,6 +1395,53 @@ Returns: Public bet %, money %, sharp vs public divergence, fade opportunities.`
 );
 
 // ═════════════════════════════════════════════════════════════════════════════
+// TOOL 27: Daily Digest
+// ═════════════════════════════════════════════════════════════════════════════
+
+server.registerTool(
+  "daily_digest",
+  {
+    title: "Daily Betting Digest / Morning Briefing",
+    description: `Get your complete daily betting briefing in one call.
+Aggregates today's games, top value plays, sharp action, key injuries,
+consensus splits, bankroll status, and yesterday's results.
+
+Run this every morning before making any bets.
+
+Args:
+  - sports (optional string[]): Sports to include (default: ["nba", "mlb", "nhl"])
+
+Returns: Comprehensive daily briefing with all sections.`,
+    inputSchema: {
+      sports: z
+        .array(z.string())
+        .optional()
+        .describe('Sports to include (default: ["nba", "mlb", "nhl"])'),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  async (params) => {
+    try {
+      const result = await getDailyDigest(params);
+      const text = truncateIfNeeded(JSON.stringify(result, null, 2));
+      return { content: [{ type: "text", text }] };
+    } catch (error) {
+      return {
+        isError: true,
+        content: [
+          { type: "text", text: error instanceof Error ? error.message : String(error) },
+        ],
+      };
+    }
+  }
+);
+
+// ═════════════════════════════════════════════════════════════════════════════
 // HTTP Server + MCP Transport
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -1514,10 +1563,14 @@ async function startServer(): Promise<void> {
 ║  Betting Intelligence MCP Server                         ║
 ║  Running on http://0.0.0.0:${port}/mcp                      ║
 ║  Health check: http://0.0.0.0:${port}/health                ║
-║  Tools: 26 registered                                    ║
+║  Tools: 27 registered                                    ║
 ║  Transport: Streamable HTTP (stateless JSON)             ║
+║  Background: line snapshots, auto-alerts, auto-CLV       ║
 ╚══════════════════════════════════════════════════════════╝
     `);
+
+    // Start background services after server is running
+    startBackgroundServices();
   });
 }
 
