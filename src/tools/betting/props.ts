@@ -137,12 +137,25 @@ async function fetchPlayerStats(
       // SportsRadar endpoints vary by sport — using their player profile endpoint
       // The exact endpoint depends on the sport-specific API
       const sportMap: Record<string, string> = {
-        nfl: "americanfootball/trial/v7/en",
-        nba: "basketball/trial/v8/en",
-        mlb: "baseball/trial/v7/en",
-        nhl: "icehockey/trial/v7/en",
+        nba: "nba/trial/v8/en",
+        mlb: "mlb/trial/v7/en",
+        nhl: "nhl/trial/v7/en",
+        ncaab: "ncaamb/trial/v8/en",
+        ncaamb: "ncaamb/trial/v8/en",
+        soccer: "soccer/trial/v4/en",
+        golf: "golf/trial/v3/en",
       };
-      const sportPath = sportMap[sport.toLowerCase()] ?? sportMap["nfl"];
+      const sportPath = sportMap[sport.toLowerCase()];
+      if (!sportPath) {
+        console.warn(`[SportsRadar] No trial subscription for ${sport} — skipping stats fetch`);
+        return {
+          season_average: 0,
+          last_10_average: 0,
+          matchup_adjusted_projection: 0,
+          opponent: "Unknown",
+          games_played: 0,
+        };
+      }
 
       // Search for player
       const searchResp = await axios.get(

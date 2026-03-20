@@ -141,10 +141,13 @@ async function fetchSportsRadarInjuries(
   team?: string
 ): Promise<InjuryReport> {
   const sportPaths: Record<string, string> = {
-    nfl: "americanfootball/trial/v7/en",
-    nba: "basketball/trial/v8/en",
-    mlb: "baseball/trial/v7/en",
-    nhl: "icehockey/trial/v7/en",
+    nba: "nba/trial/v8/en",
+    mlb: "mlb/trial/v7/en",
+    nhl: "nhl/trial/v7/en",
+    ncaab: "ncaamb/trial/v8/en",
+    ncaamb: "ncaamb/trial/v8/en",
+    soccer: "soccer/trial/v4/en",
+    golf: "golf/trial/v3/en",
   };
 
   const sportPath = sportPaths[sport.toLowerCase()];
