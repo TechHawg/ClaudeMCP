@@ -54,6 +54,7 @@ import { backtestStrategy } from "./tools/learning/backtest.js";
 import { getCalibration } from "./tools/learning/calibration.js";
 import { queryRejections } from "./tools/learning/rejection_log.js";
 import { getDailyReport } from "./tools/learning/daily_report.js";
+import { getRiskStatus } from "./tools/learning/risk_status.js";
 import { truncateIfNeeded } from "./utils/helpers.js";
 import { initializeSchema, seedSituationalAngles } from "./db/client.js";
 import { startBackgroundServices } from "./services/background.js";
@@ -1946,6 +1947,44 @@ Args:
 );
 
 // ═════════════════════════════════════════════════════════════════════════════
+// TOOL 38: Risk Status / Drawdown Breaker
+// ═════════════════════════════════════════════════════════════════════════════
+
+server.registerTool(
+  "risk_status",
+  {
+    title: "Risk Status / Drawdown Circuit Breaker",
+    description: `Reports current drawdown vs peak bankroll and the active Kelly multiplier.
+The kelly_bet_size tool consumes this automatically — bets in drawdown are sized down
+or refused. Bands: 8% drawdown → ×0.75, 15% → ×0.5, 25% → ×0.25. Daily loss limit:
+if today's P/L < -5% of peak, kelly_multiplier = 0 (no new bets until tomorrow).
+
+Args:
+  - daily_loss_limit_pct (optional): override default 5%`,
+    inputSchema: {
+      daily_loss_limit_pct: z.number().optional(),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  async (params) => {
+    try {
+      const result = await getRiskStatus(params);
+      return { content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }] };
+    } catch (error) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+      };
+    }
+  }
+);
+
+// ═════════════════════════════════════════════════════════════════════════════
 // HTTP Server + MCP Transport
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -2022,7 +2061,7 @@ async function startServer(): Promise<void> {
       server: process.env.MCP_SERVER_NAME ?? "betting-intelligence",
       version: "1.0.0",
       timestamp: new Date().toISOString(),
-      tools: 37,
+      tools: 38,
     });
   });
 
@@ -2067,7 +2106,7 @@ async function startServer(): Promise<void> {
 ║  Betting Intelligence MCP Server                         ║
 ║  Running on http://0.0.0.0:${port}/mcp                      ║
 ║  Health check: http://0.0.0.0:${port}/health                ║
-║  Tools: 37 registered                                    ║
+║  Tools: 38 registered                                    ║
 ║  Transport: Streamable HTTP (stateless JSON)             ║
 ║  Background: line snapshots, auto-alerts, auto-CLV       ║
 ╚══════════════════════════════════════════════════════════╝

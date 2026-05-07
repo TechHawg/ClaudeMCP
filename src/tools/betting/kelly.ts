@@ -8,6 +8,7 @@
 
 import { kellyBetSize, type KellyResult } from "../../utils/helpers.js";
 import { resolveKellyFraction } from "../learning/market_bankroll.js";
+import { getRiskStatus } from "../learning/risk_status.js";
 
 export interface KellyInput {
   bankroll: number;
@@ -30,6 +31,10 @@ export interface KellyOutput extends KellyResult {
   kelly_fraction_used: number;
   fraction_source: string;
   market_allocation_cap_pct?: number;
+  // Drawdown circuit breaker
+  drawdown_multiplier?: number;
+  drawdown_band?: string;
+  daily_limit_breached?: boolean;
   warning?: string;
 }
 
@@ -69,6 +74,14 @@ export async function calculateKelly(params: KellyInput): Promise<KellyOutput> {
     decimalOdds = 100 / Math.abs(params.odds) + 1;
   }
 
+  // Drawdown circuit breaker — multiplies fraction by [0..1] depending on
+  // current drawdown vs peak. Returns 0 if daily loss limit is breached.
+  const risk = await getRiskStatus();
+  if (risk.kelly_multiplier < 1) {
+    fraction = fraction * risk.kelly_multiplier;
+    fractionSource = `${fractionSource}+drawdown_${risk.drawdown_band}(×${risk.kelly_multiplier})`;
+  }
+
   let result = kellyBetSize(params.bankroll, params.edge_percentage, decimalOdds, fraction);
 
   // Apply market allocation cap: never bet more than allocation_pct of bankroll on this cluster.
@@ -84,10 +97,14 @@ export async function calculateKelly(params: KellyInput): Promise<KellyOutput> {
   }
 
   let warning: string | undefined;
-  if (fraction === 0) {
-    warning = "Per-market allocation is 0 — historical CLV is negative for this cluster. DO NOT BET.";
+  if (risk.daily_limit_breached) {
+    warning = "DAILY LOSS LIMIT BREACHED — no new bets until tomorrow.";
+  } else if (fraction === 0) {
+    warning = "Sizing zeroed by per-market allocation or drawdown breaker. DO NOT BET.";
   } else if (result.kellyPercentage <= 0) {
     warning = "Kelly formula suggests no bet — the edge is insufficient at these odds.";
+  } else if (risk.drawdown_band === "halve" || risk.drawdown_band === "quarter") {
+    warning = `Drawdown breaker active (${risk.drawdown_band}) — sizing reduced. Reconsider whether to bet at all.`;
   } else if (result.riskAssessment === "extreme") {
     warning = "Extreme risk — consider reducing kelly_fraction to 0.1 (tenth Kelly) or lowering stake.";
   } else if (result.riskAssessment === "high") {
@@ -103,6 +120,9 @@ export async function calculateKelly(params: KellyInput): Promise<KellyOutput> {
     kelly_fraction_used: Number(fraction.toFixed(3)),
     fraction_source: fractionSource,
     market_allocation_cap_pct: allocationCapPct,
+    drawdown_multiplier: risk.kelly_multiplier,
+    drawdown_band: risk.drawdown_band,
+    daily_limit_breached: risk.daily_limit_breached,
     warning,
   };
 }
