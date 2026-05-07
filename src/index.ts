@@ -56,6 +56,7 @@ import { queryRejections } from "./tools/learning/rejection_log.js";
 import { getDailyReport } from "./tools/learning/daily_report.js";
 import { getRiskStatus } from "./tools/learning/risk_status.js";
 import { runBackfill } from "./services/backfill/index.js";
+import { runSteamScan } from "./services/steam_scanner.js";
 import { truncateIfNeeded } from "./utils/helpers.js";
 import { initializeSchema, seedSituationalAngles } from "./db/client.js";
 import { startBackgroundServices } from "./services/background.js";
@@ -351,6 +352,7 @@ Returns: Combined odds, true probability, juice %, EV %, correlation warnings, r
         .describe("Parlay legs"),
       books: z.array(z.string()).optional().describe("Preferred books"),
       sport: z.string().optional().describe("Sport for correlation model (nba, nfl, mlb, nhl)"),
+      book_sgp_american_odds: z.number().optional().describe("If evaluating an SGP quote, pass the book's offered American odds. Result includes sgp_analysis with juice % vs correlation-fair price."),
     },
     annotations: {
       readOnlyHint: true,
@@ -2033,6 +2035,40 @@ Args:
 );
 
 // ═════════════════════════════════════════════════════════════════════════════
+// TOOL 40: Steam Scan (on-demand)
+// ═════════════════════════════════════════════════════════════════════════════
+
+server.registerTool(
+  "steam_scan",
+  {
+    title: "Steam Scan (Synchronized Sharp Moves)",
+    description: `Scan the last 30 minutes of line_history for synchronized sharp moves:
+≥3 sharp books moved no-vig probability for the same (game, market, side) by ≥1.5
+percentage points in the same direction. The background service runs this every 5
+minutes automatically and fires any active steam-type webhook alerts; this tool
+exposes the same scan for on-demand inspection.`,
+    inputSchema: {},
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  async () => {
+    try {
+      const result = await runSteamScan();
+      return { content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }] };
+    } catch (error) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+      };
+    }
+  }
+);
+
+// ═════════════════════════════════════════════════════════════════════════════
 // HTTP Server + MCP Transport
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -2109,7 +2145,7 @@ async function startServer(): Promise<void> {
       server: process.env.MCP_SERVER_NAME ?? "betting-intelligence",
       version: "1.0.0",
       timestamp: new Date().toISOString(),
-      tools: 39,
+      tools: 40,
     });
   });
 
@@ -2154,7 +2190,7 @@ async function startServer(): Promise<void> {
 ║  Betting Intelligence MCP Server                         ║
 ║  Running on http://0.0.0.0:${port}/mcp                      ║
 ║  Health check: http://0.0.0.0:${port}/health                ║
-║  Tools: 39 registered                                    ║
+║  Tools: 40 registered                                    ║
 ║  Transport: Streamable HTTP (stateless JSON)             ║
 ║  Background: line snapshots, auto-alerts, auto-CLV       ║
 ╚══════════════════════════════════════════════════════════╝

@@ -12,6 +12,7 @@ import { query, isDatabaseConfigured } from "../db/client.js";
 import { americanToImpliedProb, noVigProb2Way } from "../utils/helpers.js";
 import { runAutoSettle, runEnhancedClvCapture } from "./auto-settle.js";
 import { runBackfill } from "./backfill/index.js";
+import { runSteamScan } from "./steam_scanner.js";
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -74,7 +75,25 @@ export function startBackgroundServices(): void {
     intervals.push(setInterval(runIncrementalBackfill, 24 * 60 * 60 * 1000));
   }
 
+  // 8. Steam-move scanner — every 5 minutes. Detects synchronized sharp moves
+  //    in the last 30min of line_history and fires steam-type webhook alerts.
+  if (isDatabaseConfigured()) {
+    setTimeout(runSteamScanSafe, 7 * 60 * 1000); // delay 7min so line_history has data
+    intervals.push(setInterval(runSteamScanSafe, 5 * 60 * 1000));
+  }
+
   console.error("[Background] All services started");
+}
+
+async function runSteamScanSafe(): Promise<void> {
+  try {
+    const r = await runSteamScan();
+    if (r.steam_signals.length > 0) {
+      console.error(`[Steam] ${r.steam_signals.length} signals; ${r.webhooks_fired} webhooks fired`);
+    }
+  } catch (err) {
+    console.error("[Steam] scan failed:", err);
+  }
 }
 
 async function runIncrementalBackfill(): Promise<void> {

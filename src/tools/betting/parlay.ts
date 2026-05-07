@@ -43,6 +43,23 @@ export interface ParlayLeg {
   opposing_odds?: number;
 }
 
+export interface SgpAnalysis {
+  /** Decimal odds the book is offering for the SGP. */
+  book_sgp_decimal_odds: number;
+  book_sgp_american_odds: number;
+  /** Decimal odds you'd get summing the legs as straight bets. */
+  straight_combined_decimal_odds: number;
+  /** Correlation-fair decimal odds (1 / true_combined_probability). */
+  fair_decimal_odds: number;
+  /** SGP juice = (1 / book_sgp_decimal) / true_prob - 1. Positive = book overcharging. */
+  sgp_juice_pct: number;
+  /** SGP price vs straight: negative means SGP is *worse* than betting legs straight. */
+  sgp_vs_straight_pct: number;
+  /** Recommendation: take SGP, take straight, or skip. */
+  recommendation: "take_sgp" | "take_straight" | "skip";
+  reasoning: string;
+}
+
 export interface CorrelationResult {
   leg_a: string;
   leg_b: string;
@@ -82,6 +99,8 @@ export interface ParlayResult {
   reasoning: string;
   data_quality: DataQuality;
   notes: string[];
+  /** Filled when caller passes book_sgp_american_odds for same-game legs. */
+  sgp_analysis?: SgpAnalysis;
 }
 
 // ── Hardcoded correlation priors ────────────────────────────────────────────
@@ -153,6 +172,12 @@ export function buildParlay(params: {
   legs: ParlayLeg[];
   books?: string[];
   sport?: string;
+  /**
+   * If you're evaluating an SGP quote, pass the book's offered American odds for
+   * the SGP. The result will include sgp_analysis comparing book SGP price vs
+   * correlation-fair price vs the straight-leg-product price.
+   */
+  book_sgp_american_odds?: number;
 }): ParlayResult {
   const { legs, sport } = params;
 
@@ -289,6 +314,57 @@ export function buildParlay(params: {
     combinedAmerican = new Decimal(-100).div(combinedDecimal.minus(1)).toDecimalPlaces(0).toNumber();
   }
 
+  // SGP juice analysis (only meaningful when ALL legs are from the same game).
+  let sgp_analysis: SgpAnalysis | undefined;
+  if (params.book_sgp_american_odds != null) {
+    const sameGame = legs.every(
+      (l) => normalizeGameName(l.game) === normalizeGameName(legs[0].game)
+    );
+    if (!sameGame) {
+      notes.push(
+        "book_sgp_american_odds was supplied but legs are from different games — SGP analysis skipped."
+      );
+    } else {
+      const bookSgpDecimal = americanToDecimal(params.book_sgp_american_odds);
+      const bookSgpDec = bookSgpDecimal.toNumber();
+      const bookSgpProbImplied = 1 / bookSgpDec;
+      const fairDec = trueJoint > 0 ? 1 / trueJoint : Infinity;
+      const sgpJuice = trueJoint > 0
+        ? ((bookSgpProbImplied / trueJoint) - 1) * 100
+        : 0;
+      const straightCombinedDec = combinedDecimal.toNumber();
+      const sgpVsStraight = ((bookSgpDec / straightCombinedDec) - 1) * 100;
+
+      let rec: SgpAnalysis["recommendation"];
+      let rationale: string;
+      const sgpEv = (trueJoint * bookSgpDec - 1) * 100;
+      if (sgpEv > 1 && sgpVsStraight > -3) {
+        rec = "take_sgp";
+        rationale = `SGP true EV ${sgpEv.toFixed(2)}% with only ${Math.max(0, -sgpVsStraight).toFixed(1)}% give-up vs straight — book is mispricing the correlation.`;
+      } else if (sgpVsStraight > 0 && correlationAdjustedEv > 0) {
+        rec = "take_sgp";
+        rationale = `Book SGP price beats straight-leg product by ${sgpVsStraight.toFixed(2)}% — correlated EV captured at no premium.`;
+      } else if (correlationAdjustedEv > 0) {
+        rec = "take_straight";
+        rationale = `Legs are individually +EV; book SGP charges ${sgpJuice.toFixed(2)}% extra juice for the correlation. Bet straight.`;
+      } else {
+        rec = "skip";
+        rationale = `Neither SGP (${sgpEv.toFixed(2)}% EV) nor straight (${correlationAdjustedEv.toFixed(2)}% EV) is positive after de-vig.`;
+      }
+
+      sgp_analysis = {
+        book_sgp_decimal_odds: Number(bookSgpDec.toFixed(4)),
+        book_sgp_american_odds: params.book_sgp_american_odds,
+        straight_combined_decimal_odds: Number(straightCombinedDec.toFixed(4)),
+        fair_decimal_odds: Number.isFinite(fairDec) ? Number(fairDec.toFixed(4)) : 0,
+        sgp_juice_pct: Number(sgpJuice.toFixed(2)),
+        sgp_vs_straight_pct: Number(sgpVsStraight.toFixed(2)),
+        recommendation: rec,
+        reasoning: rationale,
+      };
+    }
+  }
+
   return {
     legs,
     leg_fair_odds: legFairOdds,
@@ -306,6 +382,7 @@ export function buildParlay(params: {
     reasoning,
     data_quality: anyInferred ? "inferred" : "real",
     notes,
+    sgp_analysis,
   };
 }
 

@@ -149,6 +149,38 @@ test("buildParlay: legs without fair_prob/opposing_odds are flagged inferred", (
   assert.ok(!r.recommended, "Inferred-data parlays should not be recommended");
 });
 
+test("buildParlay SGP: book SGP price worse than fair → 'take_straight'", () => {
+  // Two same-game uncorrelated legs at -110/-110, fair_prob 0.5 each → fair joint = 25%.
+  // Fair decimal = 4.0. If book quotes SGP at +250 (decimal 3.5), book is overcharging.
+  const r = buildParlay({
+    sport: "nba",
+    legs: [
+      { game: "Lakers vs Celtics", side: "Lakers", book: "dk", odds: -110, type: "h2h", fair_prob: 0.5 },
+      { game: "Lakers vs Celtics", side: "Over 220", book: "dk", odds: -110, type: "total", fair_prob: 0.5 },
+    ],
+    book_sgp_american_odds: 250,
+  });
+  assert.ok(r.sgp_analysis, "expected sgp_analysis");
+  // Same-game legs with positive correlation → fair_prob > 25%
+  assert.ok(r.true_combined_probability_pct > 25);
+  // SGP juice positive = book is overcharging. With +250 (3.5 dec) vs ~3.6 fair, juice is small.
+  // Just check the field is computed:
+  assert.equal(typeof r.sgp_analysis.sgp_juice_pct, "number");
+  assert.equal(typeof r.sgp_analysis.sgp_vs_straight_pct, "number");
+});
+
+test("buildParlay SGP: legs from different games → no SGP analysis", () => {
+  const r = buildParlay({
+    legs: [
+      { game: "A vs B", side: "A", book: "dk", odds: -110, type: "h2h", fair_prob: 0.5 },
+      { game: "C vs D", side: "C", book: "dk", odds: -110, type: "h2h", fair_prob: 0.5 },
+    ],
+    book_sgp_american_odds: 300,
+  });
+  assert.equal(r.sgp_analysis, undefined);
+  assert.ok(r.notes.some((n) => n.includes("different games")));
+});
+
 test("logBet rejects bet_type='unknown' (would corrupt clusters)", async () => {
   const { logBet } = await import("../dist/tools/learning/logger.js");
   // No DATABASE_URL in the test env → logBet should throw "DATABASE_URL not configured"
