@@ -130,7 +130,11 @@ export async function buildPlayerProp(params: {
 
 /**
  * Load real historical hit rate from prop_hit_rates table.
- * Falls back to "inferred" (heuristic) only when no data exists.
+ *
+ * Computes hit rate vs the CURRENT line from per-game actual values:
+ *   over_rate = count(actual_value > current_line) / count(*)
+ * This way the backfill doesn't need historical book lines (we don't have
+ * those for free) — we just need each game's actual stat.
  *
  * Sample-size requirement: ≥10 games for "real" quality. Fewer = inferred.
  */
@@ -147,37 +151,27 @@ async function loadHistoricalHitRate(
   }
 
   try {
-    // Pull the player's last 30 games of this market, restricted to lines within
-    // ±20% of current line so we're comparing apples to apples.
-    const lineLow = currentLine * 0.8;
-    const lineHigh = currentLine * 1.2;
-    const rows = await query<{
-      hit: boolean;
-      line: string | number;
-      actual_value: string | number | null;
-    }>(
-      `SELECT hit, line, actual_value
+    // Pull the player's last 30 games of this market, last 180 days.
+    const rows = await query<{ actual_value: string | number | null }>(
+      `SELECT actual_value
          FROM prop_hit_rates
         WHERE player_name = $1
           AND sport = $2
           AND market = $3
-          AND line BETWEEN $4 AND $5
-          AND hit IS NOT NULL
+          AND actual_value IS NOT NULL
+          AND game_date >= CURRENT_DATE - INTERVAL '180 days'
         ORDER BY game_date DESC
         LIMIT 30`,
-      [playerName, sport.toLowerCase(), market, lineLow, lineHigh]
+      [playerName, sport.toLowerCase(), market]
     );
 
     if (rows.length === 0) {
-      // No history — return missing rather than fake number
       return { rate_pct: 0, data_quality: "missing", sample_size: 0 };
     }
 
-    // Hit semantics: hit=true means OVER hit. For "under" recommendation we want
-    // (1 - over_rate) as our hit rate.
-    const overHits = rows.filter((r) => r.hit).length;
+    const overs = rows.filter((r) => Number(r.actual_value) > currentLine).length;
     const total = rows.length;
-    const overRate = (overHits / total) * 100;
+    const overRate = (overs / total) * 100;
     const ratePct = recommendation === "over" ? overRate : 100 - overRate;
 
     return {

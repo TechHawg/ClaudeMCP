@@ -55,6 +55,7 @@ import { getCalibration } from "./tools/learning/calibration.js";
 import { queryRejections } from "./tools/learning/rejection_log.js";
 import { getDailyReport } from "./tools/learning/daily_report.js";
 import { getRiskStatus } from "./tools/learning/risk_status.js";
+import { runBackfill } from "./services/backfill/index.js";
 import { truncateIfNeeded } from "./utils/helpers.js";
 import { initializeSchema, seedSituationalAngles } from "./db/client.js";
 import { startBackgroundServices } from "./services/background.js";
@@ -1985,6 +1986,53 @@ Args:
 );
 
 // ═════════════════════════════════════════════════════════════════════════════
+// TOOL 39: Backfill Player Stat History
+// ═════════════════════════════════════════════════════════════════════════════
+
+server.registerTool(
+  "backfill_player_history",
+  {
+    title: "Backfill Player Stat History (free APIs)",
+    description: `Populate prop_hit_rates with per-player per-game actual stats from free sources:
+- NBA: balldontlie.io (no key required)
+- MLB: statsapi.mlb.com
+- NHL: api-web.nhle.com
+- NFL: nflverse GitHub release CSVs
+
+After backfilling, the build_player_prop tool will report REAL historical hit rates
+(data_quality: "real") instead of "missing". Run this once after deploy and weekly
+thereafter (the background services run it automatically every 7 days).
+
+Args:
+  - sports (optional string[]): default ["nba", "mlb", "nhl", "nfl"]
+  - days_back (optional number): for NBA/MLB/NHL — default 60
+  - nfl_seasons (optional number[]): for NFL — default current + previous`,
+    inputSchema: {
+      sports: z.array(z.string()).optional(),
+      days_back: z.number().optional(),
+      nfl_seasons: z.array(z.number()).optional(),
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  async (params) => {
+    try {
+      const result = await runBackfill(params);
+      return { content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }] };
+    } catch (error) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+      };
+    }
+  }
+);
+
+// ═════════════════════════════════════════════════════════════════════════════
 // HTTP Server + MCP Transport
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -2061,7 +2109,7 @@ async function startServer(): Promise<void> {
       server: process.env.MCP_SERVER_NAME ?? "betting-intelligence",
       version: "1.0.0",
       timestamp: new Date().toISOString(),
-      tools: 38,
+      tools: 39,
     });
   });
 
@@ -2106,7 +2154,7 @@ async function startServer(): Promise<void> {
 ║  Betting Intelligence MCP Server                         ║
 ║  Running on http://0.0.0.0:${port}/mcp                      ║
 ║  Health check: http://0.0.0.0:${port}/health                ║
-║  Tools: 38 registered                                    ║
+║  Tools: 39 registered                                    ║
 ║  Transport: Streamable HTTP (stateless JSON)             ║
 ║  Background: line snapshots, auto-alerts, auto-CLV       ║
 ╚══════════════════════════════════════════════════════════╝

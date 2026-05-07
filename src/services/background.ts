@@ -11,6 +11,7 @@ import { manageAlerts } from "../tools/betting/alerts.js";
 import { query, isDatabaseConfigured } from "../db/client.js";
 import { americanToImpliedProb, noVigProb2Way } from "../utils/helpers.js";
 import { runAutoSettle, runEnhancedClvCapture } from "./auto-settle.js";
+import { runBackfill } from "./backfill/index.js";
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -65,7 +66,27 @@ export function startBackgroundServices(): void {
     intervals.push(setInterval(runEnhancedClvCapture, 3 * 60 * 1000));
   }
 
+  // 7. Player-stat backfill — daily incremental (last 3 days), to keep
+  //    prop_hit_rates fresh without thrashing the free APIs. Bigger initial
+  //    backfill should be triggered via the backfill_player_history MCP tool.
+  if (isDatabaseConfigured()) {
+    setTimeout(runIncrementalBackfill, 5 * 60 * 1000); // 5min after boot
+    intervals.push(setInterval(runIncrementalBackfill, 24 * 60 * 60 * 1000));
+  }
+
   console.error("[Background] All services started");
+}
+
+async function runIncrementalBackfill(): Promise<void> {
+  try {
+    const result = await runBackfill({
+      sports: ["nba", "mlb", "nhl"], // NFL handled weekly via the tool / UI
+      days_back: 3,
+    });
+    console.error(`[Backfill] Daily: inserted ${result.total_rows_inserted} rows; table size ${result.current_table_size}`);
+  } catch (err) {
+    console.error("[Backfill] Daily incremental failed:", err);
+  }
 }
 
 export function stopBackgroundServices(): void {

@@ -179,19 +179,54 @@ CREATE TABLE IF NOT EXISTS opening_lines (
 CREATE INDEX IF NOT EXISTS idx_opening_lines_game ON opening_lines(game_id);
 CREATE INDEX IF NOT EXISTS idx_opening_lines_sport ON opening_lines(sport);
 
--- ── Prop Hit Rate: tracks prop bet outcomes over time ───────────────────────
+-- ── Prop Hit Rate: tracks per-player per-game actual stats ──────────────────
+-- We store the ACTUAL stat per game, not pre-computed hit rates. Hit rate vs
+-- any current line is computed on the fly: count(actual_value > line) / count.
+-- This way the backfill doesn't need historical book lines (which aren't
+-- available from free APIs).
 CREATE TABLE IF NOT EXISTS prop_hit_rates (
   id              SERIAL PRIMARY KEY,
   player_name     VARCHAR(200) NOT NULL,
   sport           VARCHAR(50) NOT NULL,
   market          VARCHAR(50) NOT NULL,
-  line            NUMERIC(10,2) NOT NULL,
+  line            NUMERIC(10,2),                  -- NULL when no line was offered
   actual_value    NUMERIC(10,2),
-  hit             BOOLEAN,          -- true = over hit, false = under hit
+  hit             BOOLEAN,                        -- legacy: true = over hit (only when line known)
   game_date       DATE NOT NULL,
   game            VARCHAR(200),
-  recorded_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  source          VARCHAR(50),                    -- 'balldontlie' | 'mlb_statsapi' | 'nhl_api' | 'nflverse' | 'manual'
+  recorded_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(player_name, sport, market, game_date)
 );
+
+-- Idempotent migrations for existing databases
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'prop_hit_rates' AND column_name = 'source') THEN
+    ALTER TABLE prop_hit_rates ADD COLUMN source VARCHAR(50);
+  END IF;
+  -- Drop NOT NULL on `line` if present (legacy schema)
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'prop_hit_rates' AND column_name = 'line' AND is_nullable = 'NO'
+  ) THEN
+    ALTER TABLE prop_hit_rates ALTER COLUMN line DROP NOT NULL;
+  END IF;
+  -- Add unique constraint if not present
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'prop_hit_rates_player_name_sport_market_game_date_key'
+  ) THEN
+    BEGIN
+      ALTER TABLE prop_hit_rates
+        ADD CONSTRAINT prop_hit_rates_player_name_sport_market_game_date_key
+        UNIQUE(player_name, sport, market, game_date);
+    EXCEPTION WHEN unique_violation THEN
+      -- Pre-existing duplicates; leave it. Backfill upserts will still work via ON CONFLICT DO NOTHING.
+      NULL;
+    END;
+  END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_prop_hits_player ON prop_hit_rates(player_name);
 CREATE INDEX IF NOT EXISTS idx_prop_hits_sport ON prop_hit_rates(sport, market);
