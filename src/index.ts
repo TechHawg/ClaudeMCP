@@ -57,6 +57,7 @@ import { getDailyReport } from "./tools/learning/daily_report.js";
 import { getRiskStatus } from "./tools/learning/risk_status.js";
 import { runBackfill } from "./services/backfill/index.js";
 import { runSteamScan } from "./services/steam_scanner.js";
+import { scanProps } from "./tools/betting/scan_props.js";
 import { truncateIfNeeded } from "./utils/helpers.js";
 import { initializeSchema, seedSituationalAngles } from "./db/client.js";
 import { startBackgroundServices } from "./services/background.js";
@@ -1701,6 +1702,8 @@ Args:
       top_n: z.number().optional(),
       enforce_gates: z.boolean().optional(),
       log_rejections: z.boolean().optional(),
+      include_props: z.boolean().optional().describe("Also scan player props (default true)"),
+      min_prop_edge_pct: z.number().optional().describe("Minimum no-vig edge for props (default 2.5)"),
     },
     annotations: {
       readOnlyHint: false,
@@ -2069,6 +2072,53 @@ exposes the same scan for on-demand inspection.`,
 );
 
 // ═════════════════════════════════════════════════════════════════════════════
+// TOOL 41: Scan Player Props (batched no-vig edge scanner)
+// ═════════════════════════════════════════════════════════════════════════════
+
+server.registerTool(
+  "scan_props",
+  {
+    title: "Scan Player Props for No-Vig Edge",
+    description: `Batched prop edge scanner: walks today's events, fetches all
+bookmakers' offers per prop market, computes multi-book sharp consensus no-vig
+fair probability per (player, line), and surfaces plays where the best book
+price has > min_edge_pct no-vig edge. Hit rates from prop_hit_rates are
+attached when available.
+
+Args:
+  - sport (string): nba, nfl, mlb, nhl, ncaab, ncaaf
+  - markets (optional string[]): default per-sport list (e.g. NBA: points/rebs/assists/threes)
+  - min_edge_pct (optional number): minimum no-vig edge (default 2)
+  - max_events (optional number): API quota cap (default 8)
+  - include_hit_rate (optional boolean): attach historical hit rate (default true)`,
+    inputSchema: {
+      sport: z.string().min(1),
+      markets: z.array(z.string()).optional(),
+      min_edge_pct: z.number().optional(),
+      max_events: z.number().optional(),
+      include_hit_rate: z.boolean().optional(),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  async (params) => {
+    try {
+      const result = await scanProps(params);
+      return { content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }] };
+    } catch (error) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+      };
+    }
+  }
+);
+
+// ═════════════════════════════════════════════════════════════════════════════
 // HTTP Server + MCP Transport
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -2145,7 +2195,7 @@ async function startServer(): Promise<void> {
       server: process.env.MCP_SERVER_NAME ?? "betting-intelligence",
       version: "1.0.0",
       timestamp: new Date().toISOString(),
-      tools: 40,
+      tools: 41,
     });
   });
 
@@ -2190,7 +2240,7 @@ async function startServer(): Promise<void> {
 ║  Betting Intelligence MCP Server                         ║
 ║  Running on http://0.0.0.0:${port}/mcp                      ║
 ║  Health check: http://0.0.0.0:${port}/health                ║
-║  Tools: 40 registered                                    ║
+║  Tools: 41 registered                                    ║
 ║  Transport: Streamable HTTP (stateless JSON)             ║
 ║  Background: line snapshots, auto-alerts, auto-CLV       ║
 ╚══════════════════════════════════════════════════════════╝

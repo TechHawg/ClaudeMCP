@@ -13,6 +13,7 @@
 import { findValueLines, type ValueLine } from "./value.js";
 import { getSharpAction } from "./sharp.js";
 import { calculateKelly } from "./kelly.js";
+import { scanProps, type PropEdgePlay } from "./scan_props.js";
 import { resolveSportKey, type DataQuality } from "../../utils/helpers.js";
 import { logBetRejection } from "../learning/rejection_log.js";
 
@@ -73,6 +74,10 @@ export async function screenPlays(params: {
   enforce_gates?: boolean;
   /** Log rejections to bet_rejections table (default true). */
   log_rejections?: boolean;
+  /** If true (default), also scan player props per sport. Adds API quota cost. */
+  include_props?: boolean;
+  /** Minimum prop no-vig edge (default 2.5 — props are noisier). */
+  min_prop_edge_pct?: number;
 }): Promise<ScreenResult> {
   const sports = params.sports ?? ["nba", "mlb", "nhl"];
   const markets = params.markets ?? ["h2h", "spreads", "totals"];
@@ -80,6 +85,8 @@ export async function screenPlays(params: {
   const topN = params.top_n ?? 10;
   const enforceGates = params.enforce_gates ?? true;
   const logRejections = params.log_rejections ?? true;
+  const includeProps = params.include_props ?? true;
+  const minPropEdge = params.min_prop_edge_pct ?? 2.5;
 
   const candidates: Array<ValueLine & { sport: string; market: string }> = [];
   const sharpBySportGame = new Map<string, Awaited<ReturnType<typeof getSharpAction>>[number]>();
@@ -113,6 +120,24 @@ export async function screenPlays(params: {
         }
       } catch (err) {
         notes.push(`Value scan failed ${sport}/${market}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    // Player props (optional — adds API cost). Mapped onto the same candidate
+    // shape so the rest of the pipeline (Kelly sizing, ranking) is uniform.
+    if (includeProps) {
+      try {
+        const props = await scanProps({
+          sport,
+          min_edge_pct: minPropEdge,
+          include_hit_rate: true,
+        });
+        totalExamined += props.plays.length;
+        for (const pp of props.plays) {
+          candidates.push(propToValueLineCandidate(pp, sportKey));
+        }
+      } catch (err) {
+        notes.push(`Prop scan failed ${sport}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
   }
@@ -235,5 +260,45 @@ export async function screenPlays(params: {
     plays: top,
     rejections_summary: rejectionsByReason,
     notes,
+  };
+}
+
+/**
+ * Map a PropEdgePlay (from scan_props) into the same candidate shape used by
+ * findValueLines so screen_plays can size and gate it uniformly.
+ *
+ * Note: prop plays bypass the per-cluster CLV gate and drift gate for now —
+ * those need per-prop history that doesn't exist yet. They still benefit from
+ * per-market Kelly sizing and the drawdown breaker.
+ */
+function propToValueLineCandidate(
+  pp: PropEdgePlay,
+  sportKey: string
+): ValueLine & { sport: string; market: string } {
+  return {
+    sport: sportKey,
+    market: pp.market,
+    game: pp.game,
+    side: `${pp.player} ${pp.side} ${pp.line} (${pp.market})`,
+    point: pp.line,
+    best_book: pp.best_book,
+    best_price: pp.best_price,
+    best_decimal: pp.best_price > 0 ? pp.best_price / 100 + 1 : 100 / -pp.best_price + 1,
+    fair_prob_pct: pp.fair_prob_pct,
+    book_prob_pct: 100 - pp.fair_prob_pct + pp.no_vig_edge_pct,
+    no_vig_edge_pct: pp.no_vig_edge_pct,
+    ev_percentage: pp.ev_percentage,
+    fair_source: pp.fair_source,
+    fair_books: pp.fair_books,
+    fair_sample_size: pp.fair_sample_size,
+    value_rating:
+      pp.no_vig_edge_pct >= 5 ? 10
+        : pp.no_vig_edge_pct <= 1.5 ? 1
+          : Math.round(((pp.no_vig_edge_pct - 1.5) / 3.5) * 9 + 1),
+    data_quality: pp.data_quality,
+    passes_clv_gate: true,
+    clv_gate_reason: "CLV gate not applicable to prop scans (no per-market history yet).",
+    passes_drift_gate: true,
+    drift_gate_reason: "Drift gate not applicable to prop scans.",
   };
 }
