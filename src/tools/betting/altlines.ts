@@ -5,9 +5,25 @@
  */
 
 import axios from "axios";
-import DecimalLib from "decimal.js";
-const Decimal = DecimalLib.default ?? DecimalLib;
-import { resolveSportKey, americanToImpliedProb, americanToDecimal, formatApiError } from "../../utils/helpers.js";
+import {
+  resolveSportKey,
+  americanToImpliedProb,
+  americanToDecimal,
+  multiBookConsensusNoVig,
+  trueEvPercent,
+  formatApiError,
+  type DataQuality,
+} from "../../utils/helpers.js";
+
+const SHARP_BOOKS = new Set([
+  "pinnacle",
+  "circasports",
+  "circa",
+  "bookmaker_eu",
+  "bookmaker.eu",
+  "betcris",
+  "matchbook",
+]);
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -20,8 +36,13 @@ export interface AltLineValue {
   book: string;
   odds: number; // American
   pinnacle_equiv_odds: number | null;
+  fair_prob_pct: number;
+  fair_source: string;
+  fair_sample_size: number;
   ev_percentage: number;
+  no_vig_edge_pct: number;
   implied_prob_pct: number;
+  data_quality: DataQuality;
   recommendation: string;
 }
 
@@ -95,67 +116,94 @@ export async function scanAlternateLines(params: {
 
           const bookmakers = oddsResp.data?.bookmakers ?? [];
 
-          // Collect all lines across books
-          const linesByOutcome = new Map<string, { book: string; price: number; point: number; name: string }[]>();
+          // Build per-(name, point) groups across books, capturing both
+          // the target side and its opposing side at the same book/point.
+          // This enables proper per-book de-vig instead of using raw juiced
+          // implied probabilities.
+          interface Offer { book: string; price: number; point: number; name: string; opposingPrice?: number }
+          const groupsByLine = new Map<string, Offer[]>();
 
           for (const bm of bookmakers) {
             for (const mkt of bm.markets ?? []) {
-              for (const outcome of mkt.outcomes ?? []) {
+              const outcomes = (mkt.outcomes ?? []) as { name: string; point: number; price: number }[];
+              for (const outcome of outcomes) {
+                // Find opposing side at this book at the matching point.
+                // Spreads/totals: same point, opposite side. Totals have
+                // Over/Under strings. Spreads use point sign.
+                const opposing = outcomes.find((o) => {
+                  if (o.name === outcome.name) return false;
+                  if (market === "alternate_totals") {
+                    return Math.abs((o.point ?? 0) - (outcome.point ?? 0)) < 0.01;
+                  }
+                  if (market === "alternate_spreads") {
+                    return Math.abs((o.point ?? 0) + (outcome.point ?? 0)) < 0.01;
+                  }
+                  return false;
+                });
+
                 const key = `${outcome.name}_${outcome.point}`;
-                if (!linesByOutcome.has(key)) linesByOutcome.set(key, []);
-                linesByOutcome.get(key)!.push({
+                if (!groupsByLine.has(key)) groupsByLine.set(key, []);
+                groupsByLine.get(key)!.push({
                   book: bm.key as string,
-                  price: outcome.price as number,
-                  point: outcome.point as number,
-                  name: outcome.name as string,
+                  price: outcome.price,
+                  point: outcome.point,
+                  name: outcome.name,
+                  opposingPrice: opposing?.price,
                 });
               }
             }
           }
 
-          // Find value: compare each book's odds to the sharpest line (Pinnacle or consensus)
-          for (const [, offerings] of linesByOutcome) {
+          for (const [, offerings] of groupsByLine) {
             if (offerings.length < 2) continue;
 
-            // Find Pinnacle line as benchmark, or use average
-            const pinnacleOffer = offerings.find((o) => o.book === "pinnacle");
-            const benchmarkOdds = pinnacleOffer
-              ? pinnacleOffer.price
-              : offerings.reduce((s, o) => s + o.price, 0) / offerings.length;
+            // Build sharp consensus from Pinnacle/Circa/Bookmaker.eu/etc.
+            const sharpPairs = offerings
+              .filter((o) => SHARP_BOOKS.has(o.book.toLowerCase()) && o.opposingPrice != null)
+              .map((o) => ({
+                priceA: o.price,
+                priceB: o.opposingPrice!,
+                book: o.book,
+              }));
 
-            const benchmarkProb = americanToImpliedProb(Math.round(benchmarkOdds));
+            const consensus = multiBookConsensusNoVig(sharpPairs);
+            if (!consensus) continue; // Can't de-vig without opposing odds
+
+            const fairProb = consensus.medianProbA;
+            const pinnacleOffer = offerings.find((o) => o.book === "pinnacle");
 
             for (const offer of offerings) {
-              if (offer.book === "pinnacle") continue; // Don't compare Pinnacle to itself
+              if (SHARP_BOOKS.has(offer.book.toLowerCase())) continue;
 
               const offerProb = americanToImpliedProb(offer.price);
-              const offerDecimal = americanToDecimal(offer.price);
+              const evPct = trueEvPercent(fairProb, offer.price);
+              const edgePct = fairProb.minus(offerProb).times(100).toNumber();
 
-              // EV = (trueProb * decimalOdds) - 1
-              // trueProb estimated from Pinnacle (with ~2% vig adjustment)
-              const trueProb = benchmarkProb.times(0.975);
-              const ev = trueProb.times(offerDecimal).minus(1).times(100);
-              const evPct = ev.toDecimalPlaces(2).toNumber();
+              if (evPct < minEv) continue;
 
-              if (evPct >= minEv) {
-                valuePlays.push({
-                  game: gameName,
-                  sport: params.sport,
-                  market,
-                  side: offer.name,
-                  line: offer.point,
-                  book: offer.book,
-                  odds: offer.price,
-                  pinnacle_equiv_odds: pinnacleOffer ? pinnacleOffer.price : null,
-                  ev_percentage: evPct,
-                  implied_prob_pct: offerProb.times(100).toDecimalPlaces(2).toNumber(),
-                  recommendation: evPct >= 8
-                    ? "Strong value — significant edge over sharp benchmark"
+              valuePlays.push({
+                game: gameName,
+                sport: params.sport,
+                market,
+                side: offer.name,
+                line: offer.point,
+                book: offer.book,
+                odds: offer.price,
+                pinnacle_equiv_odds: pinnacleOffer ? pinnacleOffer.price : null,
+                fair_prob_pct: fairProb.times(100).toDecimalPlaces(2).toNumber(),
+                fair_source: consensus.sampleSize > 1 ? "multi_book_consensus" : "single_sharp_book",
+                fair_sample_size: consensus.sampleSize,
+                ev_percentage: evPct,
+                no_vig_edge_pct: Number(edgePct.toFixed(3)),
+                implied_prob_pct: offerProb.times(100).toDecimalPlaces(2).toNumber(),
+                data_quality: "real",
+                recommendation:
+                  evPct >= 8
+                    ? "Strong no-vig edge — sharp consensus disagrees materially with this book."
                     : evPct >= 5
-                    ? "Good value — moderate edge worth considering"
-                    : "Marginal value — small edge, consider with other factors",
-                });
-              }
+                      ? "Good no-vig edge — worth a small position."
+                      : "Marginal edge — only play if other signals confirm.",
+              });
             }
           }
 

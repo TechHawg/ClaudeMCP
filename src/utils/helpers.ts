@@ -103,6 +103,114 @@ export function decimalToAmerican(dec: DecimalType): number {
     .toNumber();
 }
 
+// ── No-vig (de-juiced) probabilities ─────────────────────────────────────────
+
+/**
+ * Strip vig from a 2-way market. Both prices are American odds for the
+ * two opposing sides of the same market. Returns the no-vig (fair) probability
+ * of side A. The no-vig probability of side B is (1 - returnedValue).
+ *
+ * Formula: noVig_A = impliedProb_A / (impliedProb_A + impliedProb_B)
+ */
+export function noVigProb2Way(
+  americanA: number,
+  americanB: number
+): DecimalType {
+  const pA = americanToImpliedProb(americanA);
+  const pB = americanToImpliedProb(americanB);
+  const overround = pA.plus(pB);
+  if (overround.lte(0)) return new Decimal(0.5);
+  return pA.div(overround);
+}
+
+/**
+ * Strip vig from an n-way market (e.g., 3-way moneyline with draw).
+ * Returns the no-vig probability for each side, in the same order as the input.
+ */
+export function noVigProbsNWay(americanOdds: number[]): DecimalType[] {
+  const probs = americanOdds.map((o) => americanToImpliedProb(o));
+  const overround = probs.reduce((s, p) => s.plus(p), new Decimal(0));
+  if (overround.lte(0)) return probs.map(() => new Decimal(1).div(probs.length));
+  return probs.map((p) => p.div(overround));
+}
+
+/**
+ * Compute no-vig fair odds (American) for side A given both sides' American odds.
+ * This is the "true" line stripped of bookmaker juice.
+ */
+export function noVigFairOddsAmerican(
+  americanA: number,
+  americanB: number
+): number {
+  const noVigA = noVigProb2Way(americanA, americanB);
+  if (noVigA.lte(0) || noVigA.gte(1)) return americanA;
+  const fairDecimal = new Decimal(1).div(noVigA);
+  return decimalToAmerican(fairDecimal);
+}
+
+/**
+ * Multi-book consensus no-vig probability.
+ * Given an array of (priceA, priceB) tuples — one per sharp book — returns the
+ * median no-vig probability for side A. More robust than any single book.
+ * Returns null if no valid pairs are provided.
+ */
+export function multiBookConsensusNoVig(
+  pairs: Array<{ priceA: number; priceB: number; book?: string }>
+): { medianProbA: DecimalType; sampleSize: number; books: string[] } | null {
+  const valid = pairs.filter(
+    (p) => Number.isFinite(p.priceA) && Number.isFinite(p.priceB)
+  );
+  if (valid.length === 0) return null;
+  const probs = valid
+    .map((p) => noVigProb2Way(p.priceA, p.priceB).toNumber())
+    .sort((a, b) => a - b);
+  const mid = Math.floor(probs.length / 2);
+  const median =
+    probs.length % 2 === 0
+      ? (probs[mid - 1] + probs[mid]) / 2
+      : probs[mid];
+  return {
+    medianProbA: new Decimal(median),
+    sampleSize: valid.length,
+    books: valid.map((p) => p.book ?? "unknown"),
+  };
+}
+
+/**
+ * Compute true EV% given a fair (no-vig) probability and the offered American odds.
+ * EV% = (fairProb * decimalOdds - 1) * 100.
+ * This is the only correct EV formula — anything that uses a juiced probability
+ * (raw Pinnacle implied prob) systematically inflates EV by ~half-the-vig.
+ */
+export function trueEvPercent(
+  fairProb: DecimalType | number,
+  americanOdds: number
+): number {
+  const p = typeof fairProb === "number" ? new Decimal(fairProb) : fairProb;
+  const dec = americanToDecimal(americanOdds);
+  return p.times(dec).minus(1).times(100).toDecimalPlaces(3).toNumber();
+}
+
+// ── Data Quality Flags ───────────────────────────────────────────────────────
+
+/**
+ * DataQuality describes the provenance of a signal so downstream consumers
+ * (Claude, confidence scorer) can decide how much to trust it.
+ *  - real:     measured from a reliable API or your own logged data
+ *  - inferred: derived from a heuristic (e.g., sharp % from line divergence)
+ *  - prior:    hardcoded default / unvalidated estimate (treat as a prior)
+ *  - missing:  data unavailable; signal absent
+ */
+export type DataQuality = "real" | "inferred" | "prior" | "missing";
+
+export interface QualifiedSignal<T> {
+  value: T;
+  data_quality: DataQuality;
+  source: string;
+  sample_size?: number;
+  notes?: string;
+}
+
 // ── Kelly Criterion ──────────────────────────────────────────────────────────
 
 export interface KellyResult {

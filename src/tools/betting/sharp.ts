@@ -10,7 +10,7 @@
  */
 
 import axios from "axios";
-import { formatApiError, resolveSportKey } from "../../utils/helpers.js";
+import { formatApiError, resolveSportKey, type DataQuality } from "../../utils/helpers.js";
 import { getLiveOdds } from "./odds.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -27,6 +27,8 @@ export interface SharpAction {
   steam_move_alert: boolean;
   steam_details?: string;
   data_source: string;
+  /** "real" if from ActionNetwork; "inferred" if derived from line divergence heuristic. */
+  data_quality: DataQuality;
   cached_at: string;
 }
 
@@ -119,6 +121,7 @@ async function fetchActionNetwork(
         reverse_line_movement: rlm,
         steam_move_alert: false,
         data_source: "ActionNetwork",
+        data_quality: "real",
         cached_at: new Date().toISOString(),
       };
     }
@@ -226,7 +229,8 @@ function analyzeLineMovement(
     steam_details: steamAlert
       ? `${sharpOdds.length} sharp books clustered within ${(sharpSpread * 100).toFixed(1)}% implied prob — coordinated sharp move on ${sharpSide}.`
       : undefined,
-    data_source: "LineMovementAnalysis",
+    data_source: "LineMovementAnalysis (heuristic)",
+    data_quality: "inferred",
     cached_at: new Date().toISOString(),
   };
 }

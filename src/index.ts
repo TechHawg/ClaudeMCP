@@ -211,22 +211,32 @@ Returns: Array of games with bookmaker odds, Pinnacle reference, and best lines.
 server.registerTool(
   "find_value_line",
   {
-    title: "Find Value Lines",
-    description: `Compare every book's line against Pinnacle's closing line.
-Flags any line where implied probability differential exceeds 2% as a value opportunity.
+    title: "Find Value Lines (no-vig + CLV gated)",
+    description: `Find +EV lines using a multi-book sharp consensus (Pinnacle + Circa + Bookmaker.eu + BetCRIS).
+Vig is stripped per side before edge calculation, so reported edges are TRUE no-vig edges,
+not raw implied-probability differences. Plays are auto-suppressed if the user's rolling CLV
+in that (sport, bet_type, book) cluster is negative — this closes the feedback loop and
+prevents Claude from grinding the same losing market repeatedly.
 
 Args:
   - sport (string): nfl, nba, mlb, nhl, ncaaf, ncaab
   - game (optional string): Team name filter
   - bet_type (optional string): Market — h2h, spreads, totals
   - side (optional string): Filter to a specific side
+  - min_edge_pct (optional number): Minimum no-vig edge in percentage points (default 1.5)
+  - enforce_clv_gate (optional boolean): If true (default), suppress plays in negative-CLV clusters
+  - clv_lookback_days (optional number): CLV gate window (default 60)
 
-Returns: Value lines with rating (1-10), best book, EV%, Pinnacle reference.`,
+Returns: Value lines with no_vig_edge_pct, true ev_percentage, fair_prob_pct, fair_books used,
+data_quality, passes_clv_gate, and a 1-10 value_rating.`,
     inputSchema: {
       sport: z.string().min(1).describe("Sport"),
       game: z.string().optional().describe("Team name filter"),
       bet_type: z.string().optional().describe("Market: h2h, spreads, totals"),
       side: z.string().optional().describe("Side filter"),
+      min_edge_pct: z.number().optional().describe("Minimum no-vig edge in pct points (default 1.5)"),
+      enforce_clv_gate: z.boolean().optional().describe("Suppress plays in clusters with negative CLV (default true)"),
+      clv_lookback_days: z.number().optional().describe("CLV gate lookback window (default 60)"),
     },
     annotations: {
       readOnlyHint: true,
@@ -964,6 +974,11 @@ Returns: Score 1-10, grade A+ through F, breakdown of each signal's contribution
       injury_advantage: z.boolean().optional(),
       data_completeness: z.number().min(0).max(100).optional(),
       historical_roi_for_type: z.number().optional(),
+      book: z.string().optional().describe("Book — used for auto-fetching cluster CLV"),
+      edge_is_no_vig: z.boolean().optional().describe("Set true if edge_pct was computed from no-vig consensus"),
+      sharp_data_quality: z.enum(["real", "inferred", "prior", "missing"]).optional(),
+      pinnacle_drift_pct: z.number().optional().describe("Pinnacle drift % toward your side (last hour)"),
+      situational_angles_validated: z.boolean().optional().describe("True only if matched angles have n≥50 and historical_roi>0"),
     },
     annotations: {
       readOnlyHint: true,
@@ -974,7 +989,7 @@ Returns: Score 1-10, grade A+ through F, breakdown of each signal's contribution
   },
   async (params) => {
     try {
-      const result = getConfidenceScore(params);
+      const result = await getConfidenceScore(params);
       return {
         content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
       };

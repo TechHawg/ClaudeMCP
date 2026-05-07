@@ -40,6 +40,7 @@ CREATE INDEX IF NOT EXISTS idx_bets_outcome ON bets(outcome);
 CREATE INDEX IF NOT EXISTS idx_bets_game_date ON bets(game_date);
 
 -- ── Situational Angles: reference database of proven trends ───────────────
+-- data_quality: 'prior' (seeded folklore), 'real' (measured from user data)
 CREATE TABLE IF NOT EXISTS situational_angles (
   id              SERIAL PRIMARY KEY,
   sport           VARCHAR(50) NOT NULL,
@@ -48,8 +49,20 @@ CREATE TABLE IF NOT EXISTS situational_angles (
   conditions      JSONB NOT NULL,
   historical_roi  NUMERIC(8,2),          -- % ROI
   sample_size     INTEGER NOT NULL DEFAULT 0,
+  data_quality    VARCHAR(20) NOT NULL DEFAULT 'prior',
   last_updated    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Idempotent column add for existing databases
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'situational_angles' AND column_name = 'data_quality'
+  ) THEN
+    ALTER TABLE situational_angles ADD COLUMN data_quality VARCHAR(20) NOT NULL DEFAULT 'prior';
+  END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_sit_angles_sport ON situational_angles(sport);
 

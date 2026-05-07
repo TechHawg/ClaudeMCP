@@ -5,6 +5,7 @@
  */
 
 import { isDatabaseConfigured, query } from "../../db/client.js";
+import type { DataQuality } from "../../utils/helpers.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -17,6 +18,11 @@ export interface SituationalAngle {
   historical_roi: number;
   sample_size: number;
   last_updated: string;
+  /**
+   * "real":     measured from your own logged bets (sample_size > 0 and source = user_data)
+   * "prior":    seeded default — unverified industry folklore. Useful as context, not as score input.
+   */
+  data_quality?: DataQuality;
 }
 
 export interface AngleMatch {
@@ -29,8 +35,13 @@ export interface SituationalResult {
   sport: string;
   game: string;
   matching_angles: AngleMatch[];
+  /** Validated angles meet n≥50 AND data_quality === "real". These are the only ones safe to use as confidence inputs. */
+  validated_match_count: number;
   combined_angle_score: number;
   data_source: string;
+  /** Aggregate quality of matched angles. */
+  data_quality: DataQuality;
+  notes: string[];
 }
 
 // ── Implementation ───────────────────────────────────────────────────────────
@@ -49,23 +60,48 @@ export async function getSituationalAngles(params: {
     if (match) matchingAngles.push(match);
   }
 
-  // Combined score: weighted average of ROI by sample size
+  // Combined score: weighted average of ROI by sample size — only use VALIDATED
+  // angles (real data, n>=50). Priors are surfaced as context, not score inputs.
   let totalWeight = 0;
   let weightedScore = 0;
+  let validatedMatches = 0;
   for (const m of matchingAngles) {
+    const validated = m.angle.data_quality === "real" && m.angle.sample_size >= 50;
+    if (!validated) continue;
+    validatedMatches++;
     const weight = m.angle.sample_size;
     totalWeight += weight;
     weightedScore += m.angle.historical_roi * weight;
   }
-  const combinedScore =
-    totalWeight > 0 ? weightedScore / totalWeight : 0;
+  const combinedScore = totalWeight > 0 ? weightedScore / totalWeight : 0;
+
+  const notes: string[] = [];
+  if (matchingAngles.length > 0 && validatedMatches === 0) {
+    notes.push(
+      "Matched angles are unvalidated priors — historical ROI is folklore until you've logged ≥50 of your own bets per angle. Use as context, not as a betting input."
+    );
+  }
+
+  // Aggregate data quality:
+  // - "real" if all matches are real
+  // - "prior" if all are seeded defaults
+  // - "inferred" if mixed
+  let dq: DataQuality = "missing";
+  if (matchingAngles.length > 0) {
+    const allReal = matchingAngles.every((m) => m.angle.data_quality === "real");
+    const allPrior = matchingAngles.every((m) => m.angle.data_quality === "prior");
+    dq = allReal ? "real" : allPrior ? "prior" : "inferred";
+  }
 
   return {
     sport: params.sport,
     game: params.game,
     matching_angles: matchingAngles,
+    validated_match_count: validatedMatches,
     combined_angle_score: Math.round(combinedScore * 100) / 100,
     data_source: isDatabaseConfigured() ? "PostgreSQL" : "In-memory defaults",
+    data_quality: dq,
+    notes,
   };
 }
 
@@ -83,11 +119,17 @@ async function loadAngles(sport: string): Promise<SituationalAngle[]> {
         historical_roi: number;
         sample_size: number;
         last_updated: string;
+        data_quality?: string | null;
       }>(
         "SELECT * FROM situational_angles WHERE sport = $1",
         [sport.toLowerCase()]
       );
-      if (rows.length > 0) return rows;
+      if (rows.length > 0) {
+        return rows.map((r) => ({
+          ...r,
+          data_quality: (r.data_quality as DataQuality) ?? "prior",
+        }));
+      }
     } catch {
       // Fall through to defaults
     }
@@ -148,55 +190,56 @@ function getDefaultAngles(sport: string): SituationalAngle[] {
       id: 1, sport: "nfl", name: "Road Underdog Off Bye",
       description: "Road underdogs coming off a bye week have extra preparation time.",
       conditions: { home_away: "away", favorite: false, off_bye: true },
-      historical_roi: 8.7, sample_size: 312, last_updated: new Date().toISOString(),
+      historical_roi: 8.7, sample_size: 312, last_updated: new Date().toISOString(), data_quality: "prior",
     },
     {
       id: 2, sport: "nfl", name: "Short Week Road Team",
       description: "Teams on the road after a short week underperform.",
       conditions: { home_away: "away", short_week: true },
-      historical_roi: -6.4, sample_size: 198, last_updated: new Date().toISOString(),
+      historical_roi: -6.4, sample_size: 198, last_updated: new Date().toISOString(), data_quality: "prior",
     },
     {
       id: 3, sport: "nfl", name: "Cold Weather Under",
       description: "Games in cold weather (<35F) tend to go under.",
       conditions: { temperature_below: 35, market: "total_under" },
-      historical_roi: 5.1, sample_size: 167, last_updated: new Date().toISOString(),
+      historical_roi: 5.1, sample_size: 167, last_updated: new Date().toISOString(), data_quality: "prior",
     },
     {
       id: 4, sport: "nba", name: "Back-to-Back Road",
       description: "Second game of back-to-back on the road — fatigue factor.",
       conditions: { back_to_back: true, home_away: "away" },
-      historical_roi: -4.8, sample_size: 820, last_updated: new Date().toISOString(),
+      historical_roi: -4.8, sample_size: 820, last_updated: new Date().toISOString(), data_quality: "prior",
     },
     {
       id: 5, sport: "nba", name: "4th Game in 5 Nights",
       description: "Extreme schedule fatigue.",
       conditions: { games_in_5_nights: 4 },
-      historical_roi: -7.2, sample_size: 190, last_updated: new Date().toISOString(),
+      historical_roi: -7.2, sample_size: 190, last_updated: new Date().toISOString(), data_quality: "prior",
     },
     {
       id: 6, sport: "mlb", name: "3rd Time Facing Starter",
       description: "Hitting improves significantly 3rd time through the lineup.",
       conditions: { times_faced_starter: 3 },
-      historical_roi: 4.2, sample_size: 420, last_updated: new Date().toISOString(),
+      historical_roi: 4.2, sample_size: 420, last_updated: new Date().toISOString(), data_quality: "prior",
     },
     {
       id: 7, sport: "mlb", name: "Bullpen Overuse",
       description: "Teams whose bullpen threw 4+ innings yesterday are vulnerable.",
       conditions: { opponent_bullpen_innings_prev: 4 },
-      historical_roi: 3.8, sample_size: 350, last_updated: new Date().toISOString(),
+      historical_roi: 3.8, sample_size: 350, last_updated: new Date().toISOString(), data_quality: "prior",
     },
     {
       id: 8, sport: "nhl", name: "3rd in 4 Nights",
       description: "Goaltending fatigue on third game in four nights.",
       conditions: { games_in_4_nights: 3 },
-      historical_roi: -5.5, sample_size: 260, last_updated: new Date().toISOString(),
+      historical_roi: -5.5, sample_size: 260, last_updated: new Date().toISOString(), data_quality: "prior",
     },
     {
       id: 9, sport: "nhl", name: "Home Underdog Off Loss",
       description: "Home underdogs play with urgency after a loss.",
       conditions: { home_away: "home", favorite: false, lost_prev_game: true },
       historical_roi: 4.7, sample_size: 390, last_updated: new Date().toISOString(),
+      data_quality: "prior",
     },
   ];
 
