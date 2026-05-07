@@ -118,6 +118,43 @@ export async function closePool(): Promise<void> {
   }
 }
 
+/**
+ * Run `fn` inside a single Postgres transaction. The `tx` helper exposes the
+ * same query() shape but routed through the same client so SELECT ... FOR UPDATE
+ * actually locks rows for the rest of the callback.
+ */
+export async function withTransaction<T>(
+  fn: (tx: {
+    query: <R extends pg.QueryResultRow = Record<string, unknown>>(
+      text: string,
+      params?: unknown[]
+    ) => Promise<R[]>;
+  }) => Promise<T>
+): Promise<T> {
+  const p = getPool();
+  const client = await p.connect();
+  try {
+    await client.query("BEGIN");
+    const tx = {
+      async query<R extends pg.QueryResultRow = Record<string, unknown>>(
+        text: string,
+        params?: unknown[]
+      ): Promise<R[]> {
+        const result = await client.query<R>(text, params);
+        return result.rows;
+      },
+    };
+    const result = await fn(tx);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    try { await client.query("ROLLBACK"); } catch { /* ignore */ }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 // ── Situational Angles Seed Data ─────────────────────────────────────────────
 
 interface AngleSeed {

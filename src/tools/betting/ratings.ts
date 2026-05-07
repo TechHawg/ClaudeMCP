@@ -5,7 +5,7 @@
  * If no DB, returns league-average defaults.
  */
 
-import { isDatabaseConfigured, query, queryOne } from "../../db/client.js";
+import { isDatabaseConfigured, query, queryOne, withTransaction } from "../../db/client.js";
 import DecimalLib from "decimal.js";
 const Decimal = DecimalLib.default ?? DecimalLib;
 
@@ -266,59 +266,80 @@ async function recordGameResult(
 
   const k = K_FACTOR[sport] ?? 15;
 
-  // Get or create ratings
-  const winnerRow = await getOrCreateRating(sport, winner);
-  const loserRow = await getOrCreateRating(sport, loser);
+  // Ensure rows exist before locking (UPSERT pattern). These INSERTs are no-ops
+  // if rows exist; doing them outside the transaction avoids deadlocks.
+  await ensureRating(sport, winner);
+  await ensureRating(sport, loser);
 
-  // Calculate expected scores
-  const diff = winnerRow.elo - loserRow.elo;
-  const expectedWinner = 1 / (1 + Math.pow(10, -diff / 400));
+  // Take row locks in deterministic order to avoid deadlocks under concurrent calls.
+  // Postgres SELECT ... FOR UPDATE locks the rows until COMMIT.
+  const result = await withTransaction(async (tx) => {
+    const lockOrder = [winner, loser].sort();
+    const locked = await tx.query<{ team: string; elo: number }>(
+      `SELECT team, elo FROM elo_ratings
+        WHERE sport = $1 AND team = ANY($2::text[])
+        ORDER BY team
+        FOR UPDATE`,
+      [sport, lockOrder]
+    );
+    const winnerRow = locked.find((r) => r.team === winner);
+    const loserRow = locked.find((r) => r.team === loser);
+    if (!winnerRow || !loserRow) {
+      throw new Error("Unable to lock both Elo rows — try again.");
+    }
 
-  // Margin of victory multiplier (if scores provided)
-  let movMultiplier = 1;
-  if (params.home_score !== undefined && params.away_score !== undefined) {
-    const margin = Math.abs(params.home_score - params.away_score);
-    movMultiplier = Math.log(Math.max(margin, 1) + 1) * 0.7 + 0.6;
-  }
+    const diff = winnerRow.elo - loserRow.elo;
+    const expectedWinner = 1 / (1 + Math.pow(10, -diff / 400));
 
-  // Update Elo
-  const winnerChange = Math.round(k * movMultiplier * (1 - expectedWinner));
-  const newWinnerElo = winnerRow.elo + winnerChange;
-  const newLoserElo = loserRow.elo - winnerChange;
+    let movMultiplier = 1;
+    if (params.home_score !== undefined && params.away_score !== undefined) {
+      const margin = Math.abs(params.home_score - params.away_score);
+      movMultiplier = Math.log(Math.max(margin, 1) + 1) * 0.7 + 0.6;
+    }
 
-  await query(
-    `UPDATE elo_ratings SET elo = $1, games_played = games_played + 1, wins = wins + 1, last_updated = NOW()
-     WHERE sport = $2 AND team = $3`,
-    [newWinnerElo, sport, winner]
-  );
-  await query(
-    `UPDATE elo_ratings SET elo = $1, games_played = games_played + 1, losses = losses + 1, last_updated = NOW()
-     WHERE sport = $2 AND team = $3`,
-    [newLoserElo, sport, loser]
-  );
+    const winnerChange = Math.round(k * movMultiplier * (1 - expectedWinner));
+    const newWinnerElo = winnerRow.elo + winnerChange;
+    const newLoserElo = loserRow.elo - winnerChange;
+
+    await tx.query(
+      `UPDATE elo_ratings
+          SET elo = $1, games_played = games_played + 1, wins = wins + 1, last_updated = NOW()
+        WHERE sport = $2 AND team = $3`,
+      [newWinnerElo, sport, winner]
+    );
+    await tx.query(
+      `UPDATE elo_ratings
+          SET elo = $1, games_played = games_played + 1, losses = losses + 1, last_updated = NOW()
+        WHERE sport = $2 AND team = $3`,
+      [newLoserElo, sport, loser]
+    );
+
+    return {
+      winnerOldElo: winnerRow.elo,
+      newWinnerElo,
+      loserOldElo: loserRow.elo,
+      newLoserElo,
+      winnerChange,
+    };
+  });
 
   return {
     sport,
-    message: `Updated: ${winner} ${winnerRow.elo} → ${newWinnerElo} (+${winnerChange}), ${loser} ${loserRow.elo} → ${newLoserElo} (-${winnerChange}).`,
+    message: `Updated: ${winner} ${result.winnerOldElo} → ${result.newWinnerElo} (+${result.winnerChange}), ${loser} ${result.loserOldElo} → ${result.newLoserElo} (-${result.winnerChange}).`,
   };
 }
 
-async function getOrCreateRating(
-  sport: string,
-  team: string
-): Promise<{ elo: number }> {
-  const row = await queryOne<{ elo: number }>(
-    `SELECT elo FROM elo_ratings WHERE sport = $1 AND team = $2`,
-    [sport, team]
-  );
-  if (row) return row;
-
+/** Ensure an Elo row exists for (sport, team) — idempotent. */
+async function ensureRating(sport: string, team: string): Promise<void> {
   await query(
-    `INSERT INTO elo_ratings (sport, team, elo, games_played, wins, losses) VALUES ($1, $2, $3, 0, 0, 0)`,
+    `INSERT INTO elo_ratings (sport, team, elo, games_played, wins, losses)
+     VALUES ($1, $2, $3, 0, 0, 0)
+     ON CONFLICT (sport, team) DO NOTHING`,
     [sport, team, DEFAULT_ELO]
   );
-  return { elo: DEFAULT_ELO };
 }
+
+// (legacy getOrCreateRating removed — replaced by ensureRating + transactional locking)
 
 // ── Utility ──────────────────────────────────────────────────────────────────
 

@@ -22,49 +22,50 @@ point. Edge is rare; protecting bankroll from -EV plays compounds harder than ch
 
 ## 1. The decision flow (every bet)
 
-### A. Get the no-vig fair line (Step 0 of every analysis)
-- Use `find_value_line` first — it computes the multi-book sharp consensus
-  (Pinnacle + Circa + Bookmaker.eu + BetCRIS) and strips vig per side.
+### Recommended: one-call workflow
+- `screen_plays` is the new entry point. It runs the no-vig value scan + CLV gate +
+  drift gate + sharp action cross-reference + per-market Kelly sizing in a single
+  call across multiple sports/markets, and returns the top N plays that pass ALL gates.
+- It logs rejections automatically so you can audit the gates with `rejection_log` later.
+- Pass it `bankroll`. Optionally `sports` and `markets`. That's it.
+
+### Manual workflow (when you need a specific game/side)
+
+#### A. Get the no-vig fair line
+- Use `find_value_line` or `no_vig_fair_odds` for a specific side.
 - The number you care about is `no_vig_edge_pct`, NOT raw "EV vs Pinnacle".
 - **Hard rule: skip any line where `no_vig_edge_pct < 1.5`.** That's the noise floor.
 
-### B. Check the CLV gate
-- `find_value_line` automatically suppresses plays in clusters where the user's rolling
-  CLV is < -1%. If `passes_clv_gate` is false, that bet is dead. Do not surface it to the user.
-- If the user has no history yet, the gate is permissive — communicate that.
+#### B. Check the CLV gate
+- Built into `find_value_line` and `screen_plays`. If `passes_clv_gate` is false,
+  the play is suppressed automatically.
 
-### C. Validate with sharp action
+#### C. Check the drift gate
+- Built in. If Pinnacle's no-vig probability has moved ≥1.5% AWAY from the side
+  in the last hour, `passes_drift_gate` is false. Sharp money is on the OTHER side.
+- Or check explicitly with `pinnacle_drift`.
+
+#### D. Validate with sharp action
 - `get_sharp_action` returns a `data_quality`:
   - `real` (ActionNetwork): give it full weight.
-  - `inferred` (line-divergence heuristic): treat as a tie-breaker only, never as a primary signal.
-- RLM + steam move with `data_quality: "real"` = strong confirmation.
+  - `inferred` (line-divergence heuristic): tie-breaker only.
 
-### D. Check Pinnacle drift in the last hour
-- Use `query_line_history` with hours_back=1.
-- If Pinnacle's no-vig probability for your side has DROPPED in the last hour, the
-  sharp money is on the OTHER side. Refuse the bet. This is the single biggest pre-bet defense.
+#### E. Confidence score (defense-in-depth)
+- `get_confidence_score` reads your DB automatically. Always pass `book` and
+  `edge_is_no_vig: true`. If `hard_reject: true`, do not bet.
 
-### E. Confidence score
-- `get_confidence_score` now reads your DB automatically. Always pass `book` and
-  `edge_is_no_vig: true` so it can:
-  - Auto-fetch the (sport, bet_type, book) cluster's CLV/ROI
-  - HARD REJECT if cluster has ≥30 bets and avg CLV < -1%
-- If `hard_reject: true` in the response, do not bet. No exceptions.
+#### F. Size with Kelly
+- `kelly_bet_size` with `edge_is_no_vig: true` and `sport`/`bet_type`/`book` so the
+  per-market allocation override (from `market_bankroll`) is auto-applied.
+- A market with negative measured CLV will return 0 → no bet.
 
-### F. Size with Kelly
-- `kelly_bet_size` with the `no_vig_edge_pct` from step A (NOT the raw edge).
-- Default fraction 0.25 (quarter Kelly). Drop to 0.15 if any signal has
-  `data_quality: "inferred"` or `"prior"`.
+#### G. Shop the line
+- `shop_lines` for best price. 5 cents on -110 swings ROI by ~0.5%.
 
-### G. Shop the line
-- `shop_lines` to capture the best price across books. Price improvement of 5 cents
-  on a -110 swings ROI by ~0.5%. Do this every time.
-
-### H. Log
-- `log_bet` with everything: edge, sharp_pct, sharp_data_quality, confidence, situational
-  matches, weather, the no-vig fair_prob_pct.
-- Within 5 min of game start: `record_clv` with the closing line.
-- After settle: `record_result`.
+#### H. Log
+- `log_bet` with everything (`edge_is_no_vig: true`, `sharp_data_quality`, no-vig fair_prob).
+- Within 5 min of game start: `record_clv`.
+- After settle: `record_result` (or let auto-settle handle it).
 
 ---
 
@@ -161,22 +162,37 @@ Win-rate is noise over short samples. CLV is the only metric that survives varia
 
 ---
 
-## 9. Tool index (post-iteration-1)
+## 9. Tool index
 
+### Primary workflow
 | Tool | When | Critical detail |
 |------|------|-----------------|
-| `find_value_line` | First step of every analysis | Reports `no_vig_edge_pct`, `passes_clv_gate`, `data_quality` |
+| `screen_plays` | **Start every session here** | Single-call ranked board with all gates applied |
+| `daily_report` | Morning routine | Yesterday's CLV/ROI/drawdown, optional webhook |
+| `find_value_line` | Specific sport/market query | Reports `no_vig_edge_pct`, `passes_clv_gate`, `passes_drift_gate` |
+| `no_vig_fair_odds` | Specific side query | Multi-book sharp consensus fair price |
+| `pinnacle_drift` | Pre-bet defense | Check sharp money direction over last N hours |
 | `shop_lines` | After deciding to bet | Always — 5-cent edges add up |
-| `query_line_history` | Pre-bet drift check | Hours_back=1 to see last-hour Pinnacle move |
-| `get_sharp_action` | Confirmation | Check `data_quality` field — inferred is a tie-breaker only |
-| `get_confidence_score` | Go/no-go | Pass `book` and `edge_is_no_vig: true`; respect `hard_reject` |
-| `kelly_bet_size` | Sizing | Use no-vig edge, not raw |
-| `build_parlay` | Multi-leg | Pass `opposing_odds` per leg or `fair_prob` for accurate EV |
-| `log_bet` | After placement | Include `edge_is_no_vig`, `sharp_data_quality` |
-| `record_clv` | Within 5 min of close | Non-negotiable |
-| `record_result` | After game | Non-negotiable |
+| `kelly_bet_size` | Sizing | Pass `sport`, `bet_type`, `book`, `edge_is_no_vig: true` |
+| `log_bet` → `record_clv` → `record_result` | Logging discipline | All three. Non-negotiable. |
+
+### Tuning & analysis
+| Tool | When | Critical detail |
+|------|------|-----------------|
+| `market_bankroll` | After 30+ settled bets per cluster | Auto-derives Kelly fractions from realized CLV |
+| `backtest_strategy` | When considering changing gates | Replay strategy spec on logged history |
+| `edge_calibration` | Monthly | Detect systemic edge inflation by binning predicted vs realized |
+| `rejection_log` | When gates feel too strict | Audit refused plays, see if you'd be missing winners |
 | `clv_leaderboard` | Weekly | Find +CLV clusters to scale volume into |
 | `identify_edges` | Monthly | Refocus on real edges, prune losing markets |
+| `power_ratings` | Independent fair-line check | Elo with concurrency-safe updates |
+
+### Confirmation
+| Tool | When | Critical detail |
+|------|------|-----------------|
+| `get_sharp_action` | Validation | Check `data_quality` field |
+| `get_confidence_score` | Go/no-go | Respects `hard_reject` |
+| `build_parlay` | Multi-leg | Pass `opposing_odds` per leg or pre-compute `fair_prob` |
 
 ---
 

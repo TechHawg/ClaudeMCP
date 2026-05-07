@@ -53,6 +53,7 @@ import { getNoVigFairOdds } from "./tools/betting/fair_odds.js";
 import { backtestStrategy } from "./tools/learning/backtest.js";
 import { getCalibration } from "./tools/learning/calibration.js";
 import { queryRejections } from "./tools/learning/rejection_log.js";
+import { getDailyReport } from "./tools/learning/daily_report.js";
 import { truncateIfNeeded } from "./utils/helpers.js";
 import { initializeSchema, seedSituationalAngles } from "./db/client.js";
 import { startBackgroundServices } from "./services/background.js";
@@ -1903,6 +1904,46 @@ Args:
 );
 
 // ═════════════════════════════════════════════════════════════════════════════
+// TOOL 37: Daily Report
+// ═════════════════════════════════════════════════════════════════════════════
+
+server.registerTool(
+  "daily_report",
+  {
+    title: "Daily Performance Report (with optional webhook)",
+    description: `Yesterday's CLV, ROI, drawdown, by-sport breakdown, and rejection summary.
+Pass webhook_url (or set DAILY_REPORT_WEBHOOK_URL env) to deliver to Discord/Slack.
+
+Args:
+  - date (optional ISO yyyy-mm-dd): defaults to yesterday
+  - webhook_url (optional): override the env var`,
+    inputSchema: {
+      date: z.string().optional(),
+      webhook_url: z.string().optional(),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  async (params) => {
+    try {
+      const result = await getDailyReport(params);
+      return {
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
+      };
+    } catch (error) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+      };
+    }
+  }
+);
+
+// ═════════════════════════════════════════════════════════════════════════════
 // HTTP Server + MCP Transport
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -1979,7 +2020,7 @@ async function startServer(): Promise<void> {
       server: process.env.MCP_SERVER_NAME ?? "betting-intelligence",
       version: "1.0.0",
       timestamp: new Date().toISOString(),
-      tools: 36,
+      tools: 37,
     });
   });
 
@@ -2024,7 +2065,7 @@ async function startServer(): Promise<void> {
 ║  Betting Intelligence MCP Server                         ║
 ║  Running on http://0.0.0.0:${port}/mcp                      ║
 ║  Health check: http://0.0.0.0:${port}/health                ║
-║  Tools: 36 registered                                    ║
+║  Tools: 37 registered                                    ║
 ║  Transport: Streamable HTTP (stateless JSON)             ║
 ║  Background: line snapshots, auto-alerts, auto-CLV       ║
 ╚══════════════════════════════════════════════════════════╝
