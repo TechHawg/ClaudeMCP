@@ -28,10 +28,35 @@ CREATE TABLE IF NOT EXISTS bets (
   injury_flags    JSONB DEFAULT '[]'::jsonb,
   situational_angles JSONB DEFAULT '[]'::jsonb,
   closing_line    INTEGER,                -- American odds at close
-  clv             NUMERIC(6,3),           -- closing line value in %
+  clv             NUMERIC(6,3),           -- closing line value in % (juiced — historical)
+  no_vig_clv      NUMERIC(6,3),           -- closing line value in % (no-vig, sharper measure)
+  closing_pinnacle_no_vig_prob NUMERIC(6,4), -- no-vig fair prob from sharp consensus at close
+  no_vig_edge_pct NUMERIC(6,3),           -- no-vig edge at time of bet
+  edge_is_no_vig  BOOLEAN DEFAULT FALSE,  -- whether stored edge_pct is no-vig
+  data_quality    VARCHAR(20) DEFAULT 'real', -- real | inferred | prior | missing
   outcome         VARCHAR(10),            -- win, loss, push, void
   payout          NUMERIC(12,2)
 );
+
+-- Idempotent column adds for existing databases
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'bets' AND column_name = 'no_vig_clv') THEN
+    ALTER TABLE bets ADD COLUMN no_vig_clv NUMERIC(6,3);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'bets' AND column_name = 'closing_pinnacle_no_vig_prob') THEN
+    ALTER TABLE bets ADD COLUMN closing_pinnacle_no_vig_prob NUMERIC(6,4);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'bets' AND column_name = 'no_vig_edge_pct') THEN
+    ALTER TABLE bets ADD COLUMN no_vig_edge_pct NUMERIC(6,3);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'bets' AND column_name = 'edge_is_no_vig') THEN
+    ALTER TABLE bets ADD COLUMN edge_is_no_vig BOOLEAN DEFAULT FALSE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'bets' AND column_name = 'data_quality') THEN
+    ALTER TABLE bets ADD COLUMN data_quality VARCHAR(20) DEFAULT 'real';
+  END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_bets_sport ON bets(sport);
 CREATE INDEX IF NOT EXISTS idx_bets_bet_type ON bets(bet_type);
@@ -171,3 +196,44 @@ CREATE TABLE IF NOT EXISTS prop_hit_rates (
 CREATE INDEX IF NOT EXISTS idx_prop_hits_player ON prop_hit_rates(player_name);
 CREATE INDEX IF NOT EXISTS idx_prop_hits_sport ON prop_hit_rates(sport, market);
 CREATE INDEX IF NOT EXISTS idx_prop_hits_date ON prop_hit_rates(game_date);
+
+-- ── Market Bankroll Allocations ─────────────────────────────────────────────
+-- Per (sport, bet_type, book) Kelly fraction overrides driven by realized CLV.
+-- A market with strong +CLV gets a higher fraction; a market with -CLV gets 0.
+CREATE TABLE IF NOT EXISTS market_bankroll_allocations (
+  id              SERIAL PRIMARY KEY,
+  sport           VARCHAR(50) NOT NULL,
+  bet_type        VARCHAR(50) NOT NULL,
+  book            VARCHAR(100),                  -- nullable: NULL means all books
+  allocation_pct  NUMERIC(6,3) NOT NULL,         -- % of bankroll allowed for this cluster
+  kelly_fraction  NUMERIC(4,3) NOT NULL DEFAULT 0.25,
+  basis           VARCHAR(50) NOT NULL,          -- 'manual' | 'auto_clv' | 'auto_roi'
+  basis_metric    NUMERIC(6,3),                  -- the CLV/ROI value that drove it
+  basis_n         INTEGER,                       -- sample size
+  computed_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(sport, bet_type, book)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mba_cluster ON market_bankroll_allocations(sport, bet_type);
+
+-- ── Bet Rejections (audit log of plays the system refused) ─────────────────
+-- Recording rejections is critical: it lets you see what the gates are doing,
+-- and lets you backtest whether the gates are too strict or too loose.
+CREATE TABLE IF NOT EXISTS bet_rejections (
+  id              SERIAL PRIMARY KEY,
+  rejected_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  sport           VARCHAR(50) NOT NULL,
+  bet_type        VARCHAR(50),
+  book            VARCHAR(100),
+  side            VARCHAR(200),
+  game            VARCHAR(200),
+  game_date       DATE,
+  no_vig_edge_pct NUMERIC(6,3),
+  reason          VARCHAR(50) NOT NULL,          -- 'clv_gate' | 'drift_gate' | 'edge_floor' | 'data_quality' | 'manual'
+  reason_detail   TEXT,
+  raw_signal      JSONB
+);
+
+CREATE INDEX IF NOT EXISTS idx_rejections_sport ON bet_rejections(sport);
+CREATE INDEX IF NOT EXISTS idx_rejections_reason ON bet_rejections(reason);
+CREATE INDEX IF NOT EXISTS idx_rejections_at ON bet_rejections(rejected_at);

@@ -9,7 +9,7 @@
 import { getLiveOdds, GameOdds } from "../tools/betting/odds.js";
 import { manageAlerts } from "../tools/betting/alerts.js";
 import { query, isDatabaseConfigured } from "../db/client.js";
-import { americanToImpliedProb } from "../utils/helpers.js";
+import { americanToImpliedProb, noVigProb2Way } from "../utils/helpers.js";
 import { runAutoSettle, runEnhancedClvCapture } from "./auto-settle.js";
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -168,9 +168,26 @@ async function runClvCapture(): Promise<void> {
         const closeProb = americanToImpliedProb(closingLine);
         const clv = closeProb.minus(openProb).times(100).toDecimalPlaces(3).toNumber();
 
+        // No-vig CLV: use opposing Pinnacle outcome to de-vig the closing line.
+        let noVigClv: number | null = null;
+        let closingNoVigProb: number | null = null;
+        const opposing = pinnacle.outcomes.find((o) => o.name !== outcome.name);
+        if (opposing) {
+          const closingNoVig = noVigProb2Way(closingLine, opposing.price).toNumber();
+          closingNoVigProb = Number(closingNoVig.toFixed(4));
+          const userImplied = americanToImpliedProb(betOdds).toNumber();
+          const userNoVigApprox = userImplied / 1.0225;
+          noVigClv = Number(((closingNoVig - userNoVigApprox) * 100).toFixed(3));
+        }
+
         await query(
-          `UPDATE bets SET closing_line = $1, clv = $2 WHERE id = $3`,
-          [closingLine, clv, bet.id]
+          `UPDATE bets
+              SET closing_line = $1,
+                  clv = $2,
+                  no_vig_clv = COALESCE($3, no_vig_clv),
+                  closing_pinnacle_no_vig_prob = COALESCE($4, closing_pinnacle_no_vig_prob)
+            WHERE id = $5`,
+          [closingLine, clv, noVigClv, closingNoVigProb, bet.id]
         );
 
         console.error(

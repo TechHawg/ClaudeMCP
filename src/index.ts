@@ -46,6 +46,8 @@ import { getConsensusPicks } from "./tools/betting/consensus.js";
 import { getDailyDigest } from "./tools/betting/digest.js";
 import { scanAlternateLines } from "./tools/betting/altlines.js";
 import { getCLVLeaderboard } from "./tools/learning/clv_leaderboard.js";
+import { manageMarketBankroll } from "./tools/learning/market_bankroll.js";
+import { getPinnacleDrift } from "./utils/drift.js";
 import { truncateIfNeeded } from "./utils/helpers.js";
 import { initializeSchema, seedSituationalAngles } from "./db/client.js";
 import { startBackgroundServices } from "./services/background.js";
@@ -477,14 +479,18 @@ Args:
 Returns: Recommended bet in dollars, % of bankroll, risk assessment.`,
     inputSchema: {
       bankroll: z.number().positive().describe("Total bankroll in dollars"),
-      edge_percentage: z.number().describe("Estimated edge in %"),
+      edge_percentage: z.number().describe("Estimated edge in % (preferably no-vig)"),
       odds: z.number().describe("American odds"),
       kelly_fraction: z
         .number()
         .min(0.01)
         .max(1)
         .optional()
-        .describe("Kelly fraction (default 0.25)"),
+        .describe("Kelly fraction (explicit override)"),
+      edge_is_no_vig: z.boolean().optional().describe("True if edge_percentage is no-vig (recommended). If false/missing, fraction is haircut by 40% to compensate for inflated juiced edges."),
+      sport: z.string().optional().describe("Sport — used for per-market allocation"),
+      bet_type: z.string().optional().describe("Bet type — used for per-market allocation"),
+      book: z.string().optional().describe("Book — used for per-market allocation"),
     },
     annotations: {
       readOnlyHint: true,
@@ -495,7 +501,7 @@ Returns: Recommended bet in dollars, % of bankroll, risk assessment.`,
   },
   async (params) => {
     try {
-      const result = calculateKelly(params);
+      const result = await calculateKelly(params);
       return {
         content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
       };
@@ -1554,6 +1560,105 @@ Returns: CLV rankings by sport/type/book, top individual bets, and CLV-vs-result
 );
 
 // ═════════════════════════════════════════════════════════════════════════════
+// TOOL 30: Market Bankroll Allocation
+// ═════════════════════════════════════════════════════════════════════════════
+
+server.registerTool(
+  "market_bankroll",
+  {
+    title: "Per-Market Bankroll Allocation",
+    description: `Compute and inspect per-(sport, bet_type, book) Kelly fraction overrides.
+Boosts allocation in clusters with strong realized CLV and zeroes out clusters where
+the user has demonstrated negative CLV. The kelly_bet_size tool reads this automatically
+when sport+bet_type are passed.
+
+Three actions:
+- "compute" (default): recompute allocations from settled bets in the lookback window
+- "list": list all stored allocations
+- "get": list filtered to a specific cluster
+
+Args:
+  - action (optional): "compute" | "list" | "get"
+  - sport, bet_type, book (optional): filters
+  - lookback_days (optional): default 90
+  - min_bets (optional): minimum settled bets per cluster to apply override (default 30)`,
+    inputSchema: {
+      action: z.enum(["compute", "list", "get"]).optional(),
+      sport: z.string().optional(),
+      bet_type: z.string().optional(),
+      book: z.string().optional(),
+      lookback_days: z.number().optional(),
+      min_bets: z.number().optional(),
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+  },
+  async (params) => {
+    try {
+      const result = await manageMarketBankroll(params);
+      return {
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
+      };
+    } catch (error) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+      };
+    }
+  }
+);
+
+// ═════════════════════════════════════════════════════════════════════════════
+// TOOL 31: Pinnacle Drift
+// ═════════════════════════════════════════════════════════════════════════════
+
+server.registerTool(
+  "pinnacle_drift",
+  {
+    title: "Pinnacle / Sharp-Consensus Drift",
+    description: `Compute no-vig probability drift on a side over the last N hours using
+sharp-book consensus (Pinnacle/Circa/Bookmaker.eu/BetCRIS). Positive drift means the
+sharp money is moving TOWARD your side; negative means the sharp money is moving AWAY.
+Negative drift ≥ 1.5% in the last hour is a strong refuse signal.
+
+Args:
+  - game_id (string): from get_live_odds
+  - market (string): h2h, spreads, totals
+  - side (string): the outcome name (e.g. "Chiefs", "Over 47.5")
+  - hours_back (optional number): default 1`,
+    inputSchema: {
+      game_id: z.string().min(1),
+      market: z.string().min(1),
+      side: z.string().min(1),
+      hours_back: z.number().optional(),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  async (params) => {
+    try {
+      const result = await getPinnacleDrift(params);
+      return {
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
+      };
+    } catch (error) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+      };
+    }
+  }
+);
+
+// ═════════════════════════════════════════════════════════════════════════════
 // HTTP Server + MCP Transport
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -1630,7 +1735,7 @@ async function startServer(): Promise<void> {
       server: process.env.MCP_SERVER_NAME ?? "betting-intelligence",
       version: "1.0.0",
       timestamp: new Date().toISOString(),
-      tools: 29,
+      tools: 31,
     });
   });
 
@@ -1675,7 +1780,7 @@ async function startServer(): Promise<void> {
 ║  Betting Intelligence MCP Server                         ║
 ║  Running on http://0.0.0.0:${port}/mcp                      ║
 ║  Health check: http://0.0.0.0:${port}/health                ║
-║  Tools: 29 registered                                    ║
+║  Tools: 31 registered                                    ║
 ║  Transport: Streamable HTTP (stateless JSON)             ║
 ║  Background: line snapshots, auto-alerts, auto-CLV       ║
 ╚══════════════════════════════════════════════════════════╝

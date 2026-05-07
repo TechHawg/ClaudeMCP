@@ -23,6 +23,7 @@ import {
   type DataQuality,
 } from "../../utils/helpers.js";
 import { isDatabaseConfigured, query } from "../../db/client.js";
+import { getPinnacleDrift } from "../../utils/drift.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -51,6 +52,10 @@ export interface ValueLine {
   /** True only if user CLV history for this (sport, bet_type, book) is non-negative or unknown. */
   passes_clv_gate: boolean;
   clv_gate_reason: string;
+  /** Pinnacle no-vig drift in the last hour: + means moving toward your side. */
+  pinnacle_drift_pct?: number;
+  passes_drift_gate: boolean;
+  drift_gate_reason: string;
 }
 
 export interface ValueScanResult {
@@ -87,11 +92,14 @@ export async function findValueLines(params: {
   enforce_clv_gate?: boolean;
   /** Lookback window for the CLV gate. Default 60 days. */
   clv_lookback_days?: number;
+  /** If true (default), refuse plays where Pinnacle has drifted >= 1.5% AWAY from your side in the last hour. */
+  enforce_drift_gate?: boolean;
 }): Promise<ValueScanResult> {
   const market = params.bet_type ?? "h2h";
   const minEdge = params.min_edge_pct ?? 1.5;
   const enforceClvGate = params.enforce_clv_gate ?? true;
   const clvLookback = params.clv_lookback_days ?? 60;
+  const enforceDriftGate = params.enforce_drift_gate ?? true;
 
   const games = await getLiveOdds({
     sport: params.sport,
@@ -146,16 +154,41 @@ export async function findValueLines(params: {
 
           const cluster = clusterKey(params.sport, market, offer.book);
           const clvForCluster = clvByCluster.get(cluster);
-          const passesGate =
+          const passesClv =
             !enforceClvGate ||
             clvForCluster === undefined ||
             clvForCluster >= -0.25; // 0.25% buffer to avoid noise rejection
-          const gateReason =
+          const clvReason =
             clvForCluster === undefined
               ? "No prior CLV history for this cluster (default: pass)."
-              : passesGate
+              : passesClv
                 ? `Cluster CLV ${clvForCluster.toFixed(2)}% — acceptable.`
                 : `Cluster CLV ${clvForCluster.toFixed(2)}% — historically negative; suppressed.`;
+
+          // Pinnacle drift gate — refuse if sharp money has moved AWAY from this side
+          // by >=1.5 percentage points in the last hour.
+          let drift: number | undefined;
+          let passesDrift = true;
+          let driftReason = "Drift gate not evaluated (DB unavailable or no history).";
+          if (enforceDriftGate) {
+            const driftRes = await getPinnacleDrift({
+              game_id: game.id,
+              market,
+              side: outcomeName,
+              hours_back: 1,
+            });
+            if (driftRes.reliable && driftRes.drift_pct != null) {
+              drift = driftRes.drift_pct;
+              if (drift <= -1.5) {
+                passesDrift = false;
+                driftReason = `Pinnacle no-vig prob has moved ${drift.toFixed(2)}% AWAY from this side in the last hour — sharp money is on the other side; suppressed.`;
+              } else {
+                driftReason = `Drift acceptable (${drift.toFixed(2)}% over ${driftRes.snapshots} snapshots).`;
+              }
+            } else if (driftRes.snapshots > 0) {
+              driftReason = `Insufficient drift data (${driftRes.snapshots} snapshots).`;
+            }
+          }
 
           valueLines.push({
             game: `${game.away_team} @ ${game.home_team}`,
@@ -174,17 +207,23 @@ export async function findValueLines(params: {
             fair_sample_size: consensus.sampleSize,
             value_rating: computeValueRating(edgePct),
             data_quality: "real",
-            passes_clv_gate: passesGate,
-            clv_gate_reason: gateReason,
+            passes_clv_gate: passesClv,
+            clv_gate_reason: clvReason,
+            pinnacle_drift_pct: drift,
+            passes_drift_gate: passesDrift,
+            drift_gate_reason: driftReason,
           });
         }
       }
     }
   }
 
-  // Sort: gate-passers first, then by no-vig edge.
+  // Sort: full-pass (clv && drift) first, then partial-pass, then by no-vig edge.
+  const passScore = (v: ValueLine) =>
+    (v.passes_clv_gate ? 2 : 0) + (v.passes_drift_gate ? 1 : 0);
   valueLines.sort((a, b) => {
-    if (a.passes_clv_gate !== b.passes_clv_gate) return a.passes_clv_gate ? -1 : 1;
+    const ps = passScore(b) - passScore(a);
+    if (ps !== 0) return ps;
     return b.no_vig_edge_pct - a.no_vig_edge_pct;
   });
 

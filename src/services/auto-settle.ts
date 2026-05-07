@@ -9,7 +9,7 @@
 import axios from "axios";
 import { query, isDatabaseConfigured } from "../db/client.js";
 import { getLiveOdds, GameOdds } from "../tools/betting/odds.js";
-import { americanToImpliedProb } from "../utils/helpers.js";
+import { americanToImpliedProb, noVigProb2Way } from "../utils/helpers.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -149,9 +149,31 @@ export async function runEnhancedClvCapture(): Promise<void> {
           const closeProb = americanToImpliedProb(closingLine);
           const clv = closeProb.minus(openProb).times(100).toDecimalPlaces(3).toNumber();
 
+          // No-vig CLV: compute fair prob at close using the opposing side's
+          // Pinnacle price, then compare to the user's no-vig prob at bet time.
+          let noVigClv: number | null = null;
+          let closingNoVigProb: number | null = null;
+          const opposing = pinnacle.outcomes.find((o) => o.name !== outcome.name);
+          if (opposing) {
+            const closingNoVig = noVigProb2Way(closingLine, opposing.price).toNumber();
+            closingNoVigProb = Number(closingNoVig.toFixed(4));
+            // Approximate user's bet-time no-vig prob from their offered odds:
+            // Without opposing odds at bet time, we approximate with the juice
+            // haircut. This is a known limitation — if log_bet supplied
+            // edge_is_no_vig + edge_pct, we could derive a sharper number.
+            const userImplied = americanToImpliedProb(Number(bet.odds)).toNumber();
+            const userNoVigApprox = userImplied / 1.0225; // 2.25% half-vig haircut
+            noVigClv = Number(((closingNoVig - userNoVigApprox) * 100).toFixed(3));
+          }
+
           await query(
-            `UPDATE bets SET closing_line = $1, clv = $2 WHERE id = $3`,
-            [closingLine, clv, bet.id]
+            `UPDATE bets
+                SET closing_line = $1,
+                    clv = $2,
+                    no_vig_clv = COALESCE($3, no_vig_clv),
+                    closing_pinnacle_no_vig_prob = COALESCE($4, closing_pinnacle_no_vig_prob)
+              WHERE id = $5`,
+            [closingLine, clv, noVigClv, closingNoVigProb, bet.id]
           );
 
           console.error(
