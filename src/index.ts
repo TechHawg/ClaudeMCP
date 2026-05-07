@@ -48,6 +48,11 @@ import { scanAlternateLines } from "./tools/betting/altlines.js";
 import { getCLVLeaderboard } from "./tools/learning/clv_leaderboard.js";
 import { manageMarketBankroll } from "./tools/learning/market_bankroll.js";
 import { getPinnacleDrift } from "./utils/drift.js";
+import { screenPlays } from "./tools/betting/screen.js";
+import { getNoVigFairOdds } from "./tools/betting/fair_odds.js";
+import { backtestStrategy } from "./tools/learning/backtest.js";
+import { getCalibration } from "./tools/learning/calibration.js";
+import { queryRejections } from "./tools/learning/rejection_log.js";
 import { truncateIfNeeded } from "./utils/helpers.js";
 import { initializeSchema, seedSituationalAngles } from "./db/client.js";
 import { startBackgroundServices } from "./services/background.js";
@@ -1659,6 +1664,245 @@ Args:
 );
 
 // ═════════════════════════════════════════════════════════════════════════════
+// TOOL 32: Screen Plays — single-call ranked board
+// ═════════════════════════════════════════════════════════════════════════════
+
+server.registerTool(
+  "screen_plays",
+  {
+    title: "Screen Today's Plays (single-call ranked board)",
+    description: `One-call workflow that runs no-vig value scan + CLV gate + drift gate +
+sharp action cross-reference + per-market Kelly sizing across multiple sports/markets,
+returns the top N plays that pass ALL gates, and logs rejections.
+
+This is the recommended way to start a session — it does in one call what previously
+required ~7 sequential tool calls and gives you only plays that survived every defense.
+
+Args:
+  - bankroll (number): your bankroll in dollars
+  - sports (optional string[]): default ["nba", "mlb", "nhl"]
+  - markets (optional string[]): default ["h2h", "spreads", "totals"]
+  - min_edge_pct (optional number): minimum no-vig edge (default 1.5)
+  - top_n (optional number): how many plays to return (default 10)
+  - enforce_gates (optional boolean): default true; pass false to see rejected candidates
+  - log_rejections (optional boolean): default true`,
+    inputSchema: {
+      bankroll: z.number().positive(),
+      sports: z.array(z.string()).optional(),
+      markets: z.array(z.string()).optional(),
+      min_edge_pct: z.number().optional(),
+      top_n: z.number().optional(),
+      enforce_gates: z.boolean().optional(),
+      log_rejections: z.boolean().optional(),
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  },
+  async (params) => {
+    try {
+      const result = await screenPlays(params);
+      return {
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
+      };
+    } catch (error) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+      };
+    }
+  }
+);
+
+// ═════════════════════════════════════════════════════════════════════════════
+// TOOL 33: No-Vig Fair Odds
+// ═════════════════════════════════════════════════════════════════════════════
+
+server.registerTool(
+  "no_vig_fair_odds",
+  {
+    title: "Get No-Vig Fair Odds (multi-book sharp consensus)",
+    description: `Compute the no-vig fair price for a side using a multi-book sharp consensus
+(Pinnacle/Circa/Bookmaker.eu/BetCRIS). Returns the fair_prob_pct and fair_odds_american,
+plus the best book price and the resulting edge.
+
+Args:
+  - sport (string): nfl, nba, mlb, nhl, ...
+  - game (string): team filter (e.g. "Chiefs")
+  - side (string): outcome to evaluate (e.g. "Chiefs", "Over 47.5")
+  - market (optional string): h2h (default), spreads, totals`,
+    inputSchema: {
+      sport: z.string().min(1),
+      game: z.string().min(1),
+      side: z.string().min(1),
+      market: z.string().optional(),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  async (params) => {
+    try {
+      const result = await getNoVigFairOdds(params);
+      return {
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
+      };
+    } catch (error) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+      };
+    }
+  }
+);
+
+// ═════════════════════════════════════════════════════════════════════════════
+// TOOL 34: Backtest Strategy
+// ═════════════════════════════════════════════════════════════════════════════
+
+server.registerTool(
+  "backtest_strategy",
+  {
+    title: "Backtest a Strategy on Logged Bets",
+    description: `Replay a strategy spec against your logged bets and report what would
+have happened. Useful for tuning gates: e.g., "if I had only bet plays with no_vig_edge >= 2.5
+and confidence >= 7, what would my ROI and CLV have been over the last 90 days?"
+
+Args:
+  - sport, bet_type, book (optional): cluster filters
+  - min_edge_pct (optional): minimum (juiced) edge
+  - min_no_vig_edge_pct (optional): minimum no-vig edge
+  - min_confidence (optional): minimum confidence score
+  - edge_is_no_vig (optional boolean): only include bets where edge_pct was no-vig
+  - date_from, date_to (optional ISO strings)`,
+    inputSchema: {
+      sport: z.string().optional(),
+      bet_type: z.string().optional(),
+      book: z.string().optional(),
+      min_edge_pct: z.number().optional(),
+      min_no_vig_edge_pct: z.number().optional(),
+      min_confidence: z.number().optional(),
+      edge_is_no_vig: z.boolean().optional(),
+      date_from: z.string().optional(),
+      date_to: z.string().optional(),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  async (params) => {
+    try {
+      const result = await backtestStrategy(params);
+      return {
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
+      };
+    } catch (error) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+      };
+    }
+  }
+);
+
+// ═════════════════════════════════════════════════════════════════════════════
+// TOOL 35: Edge Calibration
+// ═════════════════════════════════════════════════════════════════════════════
+
+server.registerTool(
+  "edge_calibration",
+  {
+    title: "Edge Calibration (predicted vs realized)",
+    description: `Bin logged bets by predicted no-vig edge and compute realized win rate
+vs predicted win rate. If your predicted-3% bets only win at predicted-1%, the edge
+estimator is broken — use this to detect that systemic inflation.
+
+Args:
+  - sport (optional): filter
+  - bet_type (optional): filter
+  - lookback_days (optional): default 180`,
+    inputSchema: {
+      sport: z.string().optional(),
+      bet_type: z.string().optional(),
+      lookback_days: z.number().optional(),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  async (params) => {
+    try {
+      const result = await getCalibration(params);
+      return {
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
+      };
+    } catch (error) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+      };
+    }
+  }
+);
+
+// ═════════════════════════════════════════════════════════════════════════════
+// TOOL 36: Bet Rejection Log
+// ═════════════════════════════════════════════════════════════════════════════
+
+server.registerTool(
+  "rejection_log",
+  {
+    title: "Bet Rejection Log",
+    description: `Audit the plays the system has refused. Lets you see why edges were
+gated out (clv_gate, drift_gate, kelly_zero, edge_floor, data_quality) and tune the
+gates if they look too strict.
+
+Args:
+  - sport (optional): filter
+  - reason (optional): one of clv_gate, drift_gate, kelly_zero, edge_floor, data_quality
+  - hours_back (optional): time window (default no limit)
+  - limit (optional): default 200, max 1000`,
+    inputSchema: {
+      sport: z.string().optional(),
+      reason: z.string().optional(),
+      hours_back: z.number().optional(),
+      limit: z.number().optional(),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  async (params) => {
+    try {
+      const result = await queryRejections(params);
+      return {
+        content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
+      };
+    } catch (error) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+      };
+    }
+  }
+);
+
+// ═════════════════════════════════════════════════════════════════════════════
 // HTTP Server + MCP Transport
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -1735,7 +1979,7 @@ async function startServer(): Promise<void> {
       server: process.env.MCP_SERVER_NAME ?? "betting-intelligence",
       version: "1.0.0",
       timestamp: new Date().toISOString(),
-      tools: 31,
+      tools: 36,
     });
   });
 
@@ -1780,7 +2024,7 @@ async function startServer(): Promise<void> {
 ║  Betting Intelligence MCP Server                         ║
 ║  Running on http://0.0.0.0:${port}/mcp                      ║
 ║  Health check: http://0.0.0.0:${port}/health                ║
-║  Tools: 31 registered                                    ║
+║  Tools: 36 registered                                    ║
 ║  Transport: Streamable HTTP (stateless JSON)             ║
 ║  Background: line snapshots, auto-alerts, auto-CLV       ║
 ╚══════════════════════════════════════════════════════════╝
