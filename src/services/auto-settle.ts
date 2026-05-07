@@ -331,15 +331,20 @@ async function settleBet(
   const betStake = Number(bet.stake);
   const betLine = bet.line != null ? Number(bet.line) : null;
 
-  // Find matching game from scores
-  const match = scores.find(
-    (s) =>
-      s.status === "final" &&
-      (betGame.includes(s.home_team.toLowerCase()) ||
-        betGame.includes(s.away_team.toLowerCase()) ||
-        s.home_team.toLowerCase().split(" ").some((w) => betGame.includes(w)) ||
-        s.away_team.toLowerCase().split(" ").some((w) => betGame.includes(w)))
-  );
+  // Find matching game from scores using token-based matching with a
+  // word length guard. Substring matching alone produces false positives
+  // ("Lakers" vs "Takers" if "Takers" appeared somewhere in betGame).
+  const betTokens = tokenize(betGame);
+  const match = scores.find((s) => {
+    if (s.status !== "final") return false;
+    const homeTokens = tokenize(s.home_team.toLowerCase());
+    const awayTokens = tokenize(s.away_team.toLowerCase());
+    // A token is "discriminating" if it has length >= 4 (filters "the", "of", etc.).
+    const hits = (tokens: string[]) =>
+      tokens.filter((t) => t.length >= 4 && betTokens.includes(t)).length;
+    // Need at least one discriminating token from EITHER team to consider it a match.
+    return hits(homeTokens) >= 1 || hits(awayTokens) >= 1;
+  });
 
   if (!match) return; // Game hasn't finished yet
 
@@ -427,4 +432,13 @@ async function settleBet(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Tokenize a team or game string into lowercase words. */
+function tokenize(s: string): string[] {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((t) => t.length > 0);
 }

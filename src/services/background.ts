@@ -30,9 +30,10 @@ export function startBackgroundServices(): void {
   isRunning = true;
   console.error("[Background] Starting background services...");
 
-  // 1. Line snapshots every 15 minutes
+  // 1. Line snapshots every 5 minutes (tighter than 15min so the drift gate
+  //    has 6+ snapshots within a 1-hour lookback for reliable drift signals).
   runLineSnapshots();
-  intervals.push(setInterval(runLineSnapshots, 15 * 60 * 1000));
+  intervals.push(setInterval(runLineSnapshots, 5 * 60 * 1000));
 
   // 2. Alert scanning every 5 minutes
   runAlertScan();

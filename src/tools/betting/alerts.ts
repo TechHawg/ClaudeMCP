@@ -172,11 +172,16 @@ async function checkAlerts(sportFilter?: string): Promise<AlertResult> {
           bet_type: "h2h",
         });
         const valueLines = (value as unknown as Record<string, unknown>).value_lines as Array<Record<string, unknown>> | undefined;
+        // Only fire on plays that pass BOTH the CLV gate and the drift gate.
+        // Webhook spam on suppressed plays trains bad behavior.
         const hits = (valueLines ?? []).filter(
-          (v) => ((v.ev_percentage as number) ?? 0) >= alert.threshold
+          (v) =>
+            ((v.no_vig_edge_pct as number) ?? (v.ev_percentage as number) ?? 0) >= alert.threshold &&
+            (v.passes_clv_gate as boolean) !== false &&
+            (v.passes_drift_gate as boolean) !== false
         );
         if (hits.length > 0) {
-          details = `${hits.length} value line(s) >= ${alert.threshold}% EV. Top: ${JSON.stringify(hits[0])}`;
+          details = `${hits.length} no-vig value line(s) >= ${alert.threshold}% (gates passed). Top: ${JSON.stringify(hits[0])}`;
         }
       }
 

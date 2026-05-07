@@ -729,7 +729,7 @@ Returns: bet_id for future CLV tracking and result recording.`,
       odds: z.number(),
       stake: z.number().positive(),
       book: z.string().min(1),
-      bet_type: z.string().optional(),
+      bet_type: z.string().min(1).describe("REQUIRED: h2h, spread, total, prop, parlay. 'unknown' is rejected — it pollutes clusters."),
       market: z.string().optional(),
       player_name: z.string().optional(),
       line: z.number().optional(),
@@ -743,6 +743,11 @@ Returns: bet_id for future CLV tracking and result recording.`,
       weather_summary: z.string().optional(),
       injury_flags: z.array(z.unknown()).optional(),
       situational_angles: z.array(z.unknown()).optional(),
+      // iter2 fields — pass these to keep the CLV gate functional
+      no_vig_edge_pct: z.number().optional().describe("No-vig edge in pct points (preferred over edge_pct)"),
+      edge_is_no_vig: z.boolean().optional().describe("Set true if edge_pct came from no-vig methodology"),
+      data_quality: z.enum(["real", "inferred", "prior", "missing"]).optional(),
+      closing_pinnacle_no_vig_prob: z.number().optional().describe("Filled in by auto-CLV after game start"),
     },
     annotations: {
       readOnlyHint: false,
@@ -753,10 +758,7 @@ Returns: bet_id for future CLV tracking and result recording.`,
   },
   async (params) => {
     try {
-      const result = await logBet({
-        ...params,
-        bet_type: params.bet_type ?? "unknown",
-      });
+      const result = await logBet(params);
       return {
         content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }],
       };

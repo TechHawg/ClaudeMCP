@@ -163,25 +163,25 @@ export async function getDailyDigest(params: {
     }
   }
 
-  // ── Section 2: Top value plays ───────────────────────────────────────────
+  // ── Section 2: Top value plays (gate-aware) ──────────────────────────────
   for (const sport of sports) {
     try {
-      const values = await findValueLines({ sport });
-      if (Array.isArray(values)) {
-        digest.top_value_plays.push(
-          ...values.slice(0, 3).map((v: Record<string, unknown>) => ({
-            sport,
-            ...v,
-          }))
-        );
-      }
+      const result = await findValueLines({ sport });
+      const lines = result.value_lines ?? [];
+      // Filter to plays that passed BOTH gates so the morning briefing
+      // doesn't surface bets the system would suppress later.
+      const passing = lines
+        .filter((v) => v.passes_clv_gate && v.passes_drift_gate)
+        .slice(0, 3)
+        .map((v) => ({ sport, ...v }));
+      digest.top_value_plays.push(...passing);
     } catch (error) {
       console.error(`[Digest] Failed to fetch value lines for ${sport}:`, error);
     }
   }
-  // Sort by EV and keep top 5
+  // Sort by no-vig edge (true edge) and keep top 5
   digest.top_value_plays = (digest.top_value_plays as Record<string, unknown>[])
-    .sort((a, b) => (Number(b.ev_percentage ?? 0)) - (Number(a.ev_percentage ?? 0)))
+    .sort((a, b) => (Number(b.no_vig_edge_pct ?? b.ev_percentage ?? 0)) - (Number(a.no_vig_edge_pct ?? a.ev_percentage ?? 0)))
     .slice(0, 5);
 
   // ── Section 3: Sharp action summary ──────────────────────────────────────

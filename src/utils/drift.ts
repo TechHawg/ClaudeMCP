@@ -121,7 +121,13 @@ export async function getPinnacleDrift(params: {
     result.current_prob = Number(current.toFixed(4));
     result.drift_pct = Number(((current - open) * 100).toFixed(3));
     result.snapshots = series.length;
-    result.reliable = series.length >= 3;
+    // Reliable with ≥2 snapshots when the gap is meaningful (>=10 minutes).
+    // Pre-iter5 this required 3 snapshots which was unrealistic in the first
+    // hour after server start.
+    const firstTs = new Date(series[0].ts + ":00Z").getTime();
+    const lastTs = new Date(series[series.length - 1].ts + ":00Z").getTime();
+    const gapMinutes = (lastTs - firstTs) / 60000;
+    result.reliable = series.length >= 2 && gapMinutes >= 10;
   } catch (err) {
     console.error("[Drift] query failed:", err);
   }

@@ -26,9 +26,12 @@ export interface PropCard {
   opponent_defensive_rank?: number;
   recommendation: "over" | "under";
   historical_hit_rate_pct: number;
+  hit_rate_data_quality: "real" | "inferred" | "missing";
+  hit_rate_sample_size: number;
   matchup_edge_score: number; // 1-10
   confidence_score: number; // 1-10
   supporting_data: string[];
+  data_quality: "real" | "inferred" | "missing";
   cached_at: string;
 }
 
@@ -58,13 +61,16 @@ export async function buildPlayerProp(params: {
   const recommendation: "over" | "under" =
     projection > line ? "over" : "under";
 
-  // Calculate historical hit rate (simulated based on averages)
-  const hitRate = calculateHitRate(
-    stats.season_average,
-    stats.last_10_average,
+  // Real hit rate from prop_hit_rates table when available; fall back to
+  // honest "missing"/"inferred" instead of fabricating a number.
+  const hitRateInfo = await loadHistoricalHitRate(
+    params.player_name,
+    params.sport,
+    params.market,
     line,
     recommendation
   );
+  const hitRate = hitRateInfo.rate_pct;
 
   // Matchup edge: how much the defensive matchup shifts the projection
   const matchupEdge = calculateMatchupEdge(
@@ -72,13 +78,19 @@ export async function buildPlayerProp(params: {
     stats.matchup_adjusted_projection
   );
 
-  // Confidence: composite of hit rate, matchup edge, and data quality
+  // Confidence: only weight hit rate when it's REAL data.
+  const hitRateContribution = hitRateInfo.data_quality === "real" ? (hitRate / 10) * 3 : 0;
   const confidence = Math.min(
     10,
     Math.round(
-      (hitRate / 10) * 3 + matchupEdge * 0.4 + (stats.games_played > 15 ? 3 : 1)
+      hitRateContribution + matchupEdge * 0.4 + (stats.games_played > 15 ? 3 : 1)
     )
   );
+
+  // Aggregate data quality for the card
+  const overallDq: "real" | "inferred" | "missing" =
+    stats.games_played === 0 ? "missing"
+      : hitRateInfo.data_quality === "real" ? "real" : "inferred";
 
   const supporting: string[] = [
     `Season avg: ${stats.season_average.toFixed(1)}`,
@@ -106,11 +118,77 @@ export async function buildPlayerProp(params: {
     opponent_defensive_rank: stats.opponent_defensive_rank,
     recommendation,
     historical_hit_rate_pct: hitRate,
+    hit_rate_data_quality: hitRateInfo.data_quality,
+    hit_rate_sample_size: hitRateInfo.sample_size,
     matchup_edge_score: matchupEdge,
     confidence_score: confidence,
     supporting_data: supporting,
+    data_quality: overallDq,
     cached_at: now,
   };
+}
+
+/**
+ * Load real historical hit rate from prop_hit_rates table.
+ * Falls back to "inferred" (heuristic) only when no data exists.
+ *
+ * Sample-size requirement: ≥10 games for "real" quality. Fewer = inferred.
+ */
+async function loadHistoricalHitRate(
+  playerName: string,
+  sport: string,
+  market: string,
+  currentLine: number,
+  recommendation: "over" | "under"
+): Promise<{ rate_pct: number; data_quality: "real" | "inferred" | "missing"; sample_size: number }> {
+  const { isDatabaseConfigured, query } = await import("../../db/client.js");
+  if (!isDatabaseConfigured()) {
+    return { rate_pct: 0, data_quality: "missing", sample_size: 0 };
+  }
+
+  try {
+    // Pull the player's last 30 games of this market, restricted to lines within
+    // ±20% of current line so we're comparing apples to apples.
+    const lineLow = currentLine * 0.8;
+    const lineHigh = currentLine * 1.2;
+    const rows = await query<{
+      hit: boolean;
+      line: string | number;
+      actual_value: string | number | null;
+    }>(
+      `SELECT hit, line, actual_value
+         FROM prop_hit_rates
+        WHERE player_name = $1
+          AND sport = $2
+          AND market = $3
+          AND line BETWEEN $4 AND $5
+          AND hit IS NOT NULL
+        ORDER BY game_date DESC
+        LIMIT 30`,
+      [playerName, sport.toLowerCase(), market, lineLow, lineHigh]
+    );
+
+    if (rows.length === 0) {
+      // No history — return missing rather than fake number
+      return { rate_pct: 0, data_quality: "missing", sample_size: 0 };
+    }
+
+    // Hit semantics: hit=true means OVER hit. For "under" recommendation we want
+    // (1 - over_rate) as our hit rate.
+    const overHits = rows.filter((r) => r.hit).length;
+    const total = rows.length;
+    const overRate = (overHits / total) * 100;
+    const ratePct = recommendation === "over" ? overRate : 100 - overRate;
+
+    return {
+      rate_pct: Number(ratePct.toFixed(1)),
+      data_quality: total >= 10 ? "real" : "inferred",
+      sample_size: total,
+    };
+  } catch (err) {
+    console.error("[Props] historical hit rate query failed:", err);
+    return { rate_pct: 0, data_quality: "missing", sample_size: 0 };
+  }
 }
 
 // ── SportsRadar stats fetcher ────────────────────────────────────────────────
@@ -656,7 +734,10 @@ async function fetchPropLines(
 
 // ── Calculation helpers ──────────────────────────────────────────────────────
 
-function calculateHitRate(
+// DEPRECATED: replaced by loadHistoricalHitRate which queries prop_hit_rates.
+// Kept only for backward compat; no longer called.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function _deprecated_calculateHitRate(
   seasonAvg: number,
   last10Avg: number,
   line: number,
