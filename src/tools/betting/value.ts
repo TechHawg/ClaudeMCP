@@ -115,6 +115,10 @@ export async function findValueLines(params: {
     ? await loadClvByCluster(params.sport, market, clvLookback)
     : new Map<string, number>();
 
+  // Cache drift queries by (game_id, market, side, point) so we don't
+  // hit the DB once per book (~8 books × per side = wasted queries).
+  const driftCache = new Map<string, Awaited<ReturnType<typeof getPinnacleDrift>>>();
+
   for (const game of games) {
     // Build the universe of opposing-side prices for each named outcome.
     // We pair them per book so we can de-vig per book.
@@ -166,17 +170,23 @@ export async function findValueLines(params: {
                 : `Cluster CLV ${clvForCluster.toFixed(2)}% — historically negative; suppressed.`;
 
           // Pinnacle drift gate — refuse if sharp money has moved AWAY from this side
-          // by >=1.5 percentage points in the last hour.
+          // by >=1.5 percentage points in the last hour. Cached per (game, side, point)
+          // so we don't query the DB once per book.
           let drift: number | undefined;
           let passesDrift = true;
           let driftReason = "Drift gate not evaluated (DB unavailable or no history).";
           if (enforceDriftGate) {
-            const driftRes = await getPinnacleDrift({
-              game_id: game.id,
-              market,
-              side: outcomeName,
-              hours_back: 1,
-            });
+            const driftCacheKey = `${game.id}|${market}|${outcomeName}|${pointKey}`;
+            let driftRes = driftCache.get(driftCacheKey);
+            if (!driftRes) {
+              driftRes = await getPinnacleDrift({
+                game_id: game.id,
+                market,
+                side: outcomeName,
+                hours_back: 1,
+              });
+              driftCache.set(driftCacheKey, driftRes);
+            }
             if (driftRes.reliable && driftRes.drift_pct != null) {
               drift = driftRes.drift_pct;
               if (drift <= -1.5) {
