@@ -32,7 +32,7 @@ const BASE = "https://api.balldontlie.io/v1/stats";
 export async function backfillNBA(params: {
   days_back?: number;
   source_label?: string;
-} = {}): Promise<{ days: number; rows_inserted: number; api_calls: number }> {
+} = {}): Promise<{ days: number; rows_inserted: number; api_calls: number; aborted?: boolean }> {
   const days = params.days_back ?? 60;
   const source = params.source_label ?? "balldontlie";
   const apiKey = process.env.BALLDONTLIE_API_KEY;
@@ -41,9 +41,11 @@ export async function backfillNBA(params: {
 
   let totalInserted = 0;
   let apiCalls = 0;
+  let unauthorizedAbort = false;
   const today = new Date();
 
   for (let d = 0; d < days; d++) {
+    if (unauthorizedAbort) break;
     const date = isoDate(new Date(today.getTime() - d * 24 * 3600 * 1000));
     let cursor: number | undefined;
 
@@ -101,11 +103,35 @@ export async function backfillNBA(params: {
         cursor = resp.data?.meta?.next_cursor;
         await sleep(250); // be nice to free tier
       } catch (err) {
-        console.error(`[Backfill/NBA] ${date} failed:`, err instanceof Error ? err.message : err);
-        cursor = undefined;
+        const status = (err as { response?: { status?: number } })?.response?.status;
+        if (status === 401 || status === 403) {
+          // balldontlie now requires a free key for the stats endpoint.
+          // Stop the entire backfill — there's no point retrying every date.
+          if (!apiKey) {
+            console.error(
+              `[Backfill/NBA] balldontlie returned ${status} — stats endpoint requires a free API key. ` +
+              `Sign up at https://app.balldontlie.io/, then set BALLDONTLIE_API_KEY in Railway. Aborting NBA backfill.`
+            );
+          } else {
+            console.error(
+              `[Backfill/NBA] balldontlie returned ${status} with key set — your key may be invalid or rate-limited. Aborting NBA backfill.`
+            );
+          }
+          unauthorizedAbort = true;
+          cursor = undefined;
+          break;
+        }
+        if (status === 429) {
+          console.error("[Backfill/NBA] balldontlie 429 — backing off 30s and skipping this date.");
+          await sleep(30000);
+          cursor = undefined;
+        } else {
+          console.error(`[Backfill/NBA] ${date} failed:`, err instanceof Error ? err.message : err);
+          cursor = undefined;
+        }
       }
     } while (cursor != null);
   }
 
-  return { days, rows_inserted: totalInserted, api_calls: apiCalls };
+  return { days, rows_inserted: totalInserted, api_calls: apiCalls, aborted: unauthorizedAbort } as { days: number; rows_inserted: number; api_calls: number; aborted?: boolean };
 }

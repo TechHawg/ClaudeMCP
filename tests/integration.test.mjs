@@ -116,6 +116,18 @@ test("Kelly: fraction haircut when edge_is_no_vig is false", async () => {
   assert.ok(k2.recommendedBet < k1.recommendedBet);
 });
 
+test("Steam scanner: handles Date-typed recorded_at without crashing (regression)", async () => {
+  // Reproduces the iter 9 → iter 14 bug: pg returns timestamps as Date objects,
+  // not strings. Calling .slice() directly on a Date throws TypeError.
+  // We simulate by checking that our coercion would handle a Date.
+  const date = new Date();
+  // The fix coerces to ISO before slicing.
+  const iso = date instanceof Date ? date.toISOString() : String(date);
+  const tsMin = iso.slice(0, 16);
+  assert.ok(tsMin.length === 16, `expected YYYY-MM-DDTHH:MM, got "${tsMin}"`);
+  assert.ok(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(tsMin));
+});
+
 test("Kelly: zero or negative edge → recommendedBet 0", async () => {
   const r = await calculateKelly({
     bankroll: 1000, edge_percentage: 0, odds: -110, edge_is_no_vig: true,

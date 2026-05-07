@@ -23,6 +23,29 @@ const intervals: NodeJS.Timeout[] = [];
 // Core sports to snapshot (uses user-friendly aliases → resolveSportKey handles mapping)
 const SNAPSHOT_SPORTS = ["nba", "mlb", "nhl", "ncaab"];
 
+/**
+ * The Odds API publishes remaining-quota in response headers; getLiveOdds logs
+ * it. We track the most recently seen value here so background services can
+ * back off when running low.
+ */
+let lastKnownQuotaRemaining: number | null = null;
+const QUOTA_FLOOR = parseInt(process.env.ODDS_API_QUOTA_FLOOR ?? "1500", 10);
+
+export function reportOddsApiQuota(remaining: number): void {
+  lastKnownQuotaRemaining = remaining;
+}
+
+function quotaSafe(): boolean {
+  if (lastKnownQuotaRemaining == null) return true;
+  if (lastKnownQuotaRemaining <= QUOTA_FLOOR) {
+    console.error(
+      `[Quota] OddsAPI remaining=${lastKnownQuotaRemaining} <= floor=${QUOTA_FLOOR} — skipping snapshot cycle.`
+    );
+    return false;
+  }
+  return true;
+}
+
 // ── Public API ───────────────────────────────────────────────────────────────
 
 export function startBackgroundServices(): void {
@@ -33,12 +56,13 @@ export function startBackgroundServices(): void {
   isRunning = true;
   console.error("[Background] Starting background services...");
 
-  // 1. Line snapshots every 5 minutes (tighter than 15min so the drift gate
-  //    has 6+ snapshots within a 1-hour lookback for reliable drift signals).
+  // 1. Line snapshots every 10 minutes. Drift gate needs ≥2 snapshots/1h —
+  //    10min cadence gives 6/hour, more than enough. 5min was burning quota
+  //    (~26K/month at 4 sports × 3 markets — over the 20K Odds API tier).
   runLineSnapshots();
-  intervals.push(setInterval(runLineSnapshots, 5 * 60 * 1000));
+  intervals.push(setInterval(runLineSnapshots, 10 * 60 * 1000));
 
-  // 2. Alert scanning every 5 minutes
+  // 2. Alert scanning every 5 minutes (no API cost — uses cached odds)
   runAlertScan();
   intervals.push(setInterval(runAlertScan, 5 * 60 * 1000));
 
@@ -50,10 +74,11 @@ export function startBackgroundServices(): void {
     console.error("[Background] No DATABASE_URL — CLV auto-capture disabled");
   }
 
-  // 4. Opening line capture every 30 minutes (DB required)
+  // 4. Opening line capture every 4 hours (was 30min — opening lines only
+  //    matter once per game; 30min was wasting quota on duplicate captures).
   if (isDatabaseConfigured()) {
-    runOpeningLineCapture();
-    intervals.push(setInterval(runOpeningLineCapture, 30 * 60 * 1000));
+    setTimeout(runOpeningLineCapture, 60 * 1000);
+    intervals.push(setInterval(runOpeningLineCapture, 4 * 60 * 60 * 1000));
   }
 
   // 5. Auto-settle bets every 10 minutes (pulls final scores, settles pending bets)
@@ -137,6 +162,7 @@ let snapshotIndex = 0;
 
 async function runLineSnapshots(): Promise<void> {
   try {
+    if (!quotaSafe()) return;
     // Rotate through one sport per cycle to conserve API quota
     const sport = SNAPSHOT_SPORTS[snapshotIndex % SNAPSHOT_SPORTS.length];
     snapshotIndex++;

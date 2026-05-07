@@ -122,13 +122,23 @@ export async function getLiveOdds(params: {
       console.error("[LineHistory] Failed to record:", err)
     );
 
-    // Log remaining quota
+    // Log remaining quota and feed it back to background services so they
+    // can throttle when we're running low.
     const remaining = resp.headers["x-requests-remaining"];
     const used = resp.headers["x-requests-used"];
     if (remaining) {
       console.error(
         `[OddsAPI] Quota: ${used} used, ${remaining} remaining this month`
       );
+      const remainingNum = Number(remaining);
+      if (Number.isFinite(remainingNum)) {
+        // Lazy import to avoid pulling background.ts into the module graph
+        // (it has setInterval side effects when imported eagerly).
+        try {
+          const bg = await import("../../services/background.js");
+          bg.reportOddsApiQuota(remainingNum);
+        } catch { /* non-fatal */ }
+      }
     }
 
     if (params.game) return filterByTeam(games, params.game);

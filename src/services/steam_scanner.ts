@@ -39,7 +39,7 @@ export async function runSteamScan(): Promise<{ steam_signals: SteamSignal[]; we
     book: string;
     side: string;
     odds: number;
-    recorded_at: string;
+    recorded_at: string | Date;
   }>(
     `SELECT game_id, market, book, side, odds, recorded_at
        FROM line_history
@@ -56,13 +56,13 @@ export async function runSteamScan(): Promise<{ steam_signals: SteamSignal[]; we
   const buckets = new Map<string, Map<string, { open: Pair; current: Pair }>>();
   // Outer key: game_id|market|sideA-name; inner key: book
 
-  // First pass: identify outcome names per (game, market) so we can pair sides.
-  const outcomeNamesByGameMkt = new Map<string, Set<string>>();
-  for (const r of rows) {
-    const k = `${r.game_id}|${r.market}`;
-    if (!outcomeNamesByGameMkt.has(k)) outcomeNamesByGameMkt.set(k, new Set());
-    outcomeNamesByGameMkt.get(k)!.add(r.side);
-  }
+    // First pass: identify outcome names per (game, market) so we can pair sides.
+    const outcomeNamesByGameMkt = new Map<string, Set<string>>();
+    for (const r of rows) {
+      const k = `${r.game_id}|${r.market}`;
+      if (!outcomeNamesByGameMkt.has(k)) outcomeNamesByGameMkt.set(k, new Set());
+      outcomeNamesByGameMkt.get(k)!.add(r.side);
+    }
 
   // For each (game, market), pick a primary side (alphabetically first) and pair vs others.
   // For 2-way markets there's exactly one opposing side; for n-way we degrade to first opposing.
@@ -80,7 +80,11 @@ export async function runSteamScan(): Promise<{ steam_signals: SteamSignal[]; we
     // Build per-book per-timestamp pairs
     const perBookTime = new Map<string, Map<string, Pair>>();
     for (const r of relevant) {
-      const tsMin = r.recorded_at.slice(0, 16); // minute precision
+      // pg returns timestamps as Date objects, not strings. Coerce safely.
+      const recordedAtIso = r.recorded_at instanceof Date
+        ? r.recorded_at.toISOString()
+        : String(r.recorded_at);
+      const tsMin = recordedAtIso.slice(0, 16); // minute precision
       const book = r.book.toLowerCase();
       if (!perBookTime.has(book)) perBookTime.set(book, new Map());
       const tmap = perBookTime.get(book)!;

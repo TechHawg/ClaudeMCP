@@ -62,7 +62,7 @@ export async function getPinnacleDrift(params: {
       book: string;
       side: string;
       odds: number;
-      recorded_at: string;
+      recorded_at: string | Date;
     }>(
       `SELECT book, side, odds, recorded_at
          FROM line_history
@@ -82,7 +82,7 @@ export async function getPinnacleDrift(params: {
     const buckets = new Map<string, Map<string, BookSnapshot>>();
 
     for (const r of rows) {
-      const tsKey = new Date(r.recorded_at).toISOString().slice(0, 16); // minute precision
+      const tsKey = new Date(r.recorded_at as string | Date).toISOString().slice(0, 16); // minute precision
       if (!buckets.has(tsKey)) buckets.set(tsKey, new Map());
       const bookMap = buckets.get(tsKey)!;
       const book = r.book.toLowerCase();
