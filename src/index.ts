@@ -58,6 +58,8 @@ import { getRiskStatus } from "./tools/learning/risk_status.js";
 import { runBackfill } from "./services/backfill/index.js";
 import { runSteamScan } from "./services/steam_scanner.js";
 import { scanProps } from "./tools/betting/scan_props.js";
+import { getProbableStarters } from "./tools/betting/probable_starters.js";
+import { getSystemPerformance } from "./tools/learning/system_recommendations.js";
 import { truncateIfNeeded } from "./utils/helpers.js";
 import { initializeSchema, seedSituationalAngles } from "./db/client.js";
 import { startBackgroundServices } from "./services/background.js";
@@ -753,6 +755,7 @@ Returns: bet_id for future CLV tracking and result recording.`,
       edge_is_no_vig: z.boolean().optional().describe("Set true if edge_pct came from no-vig methodology"),
       data_quality: z.enum(["real", "inferred", "prior", "missing"]).optional(),
       closing_pinnacle_no_vig_prob: z.number().optional().describe("Filled in by auto-CLV after game start"),
+      is_live: z.boolean().optional().describe("True if this is an in-play bet — enables live drift CLV capture 60s after placement"),
     },
     annotations: {
       readOnlyHint: false,
@@ -2119,6 +2122,89 @@ Args:
 );
 
 // ═════════════════════════════════════════════════════════════════════════════
+// TOOL 42: Probable Starters (MLB pitchers, NHL goalies)
+// ═════════════════════════════════════════════════════════════════════════════
+
+server.registerTool(
+  "probable_starters",
+  {
+    title: "Probable Starting Pitchers / Goalies",
+    description: `Returns probable starting pitchers (MLB) or goalies (NHL) for the slate.
+Used by scan_props to refuse pitcher/goalie props on unconfirmed starters.
+
+Args:
+  - sport (string): "mlb" | "nhl"
+  - date (optional): YYYY-MM-DD (defaults to today)`,
+    inputSchema: {
+      sport: z.string().min(1),
+      date: z.string().optional(),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  async (params) => {
+    try {
+      const result = await getProbableStarters(params);
+      return { content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }] };
+    } catch (error) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+      };
+    }
+  }
+);
+
+// ═════════════════════════════════════════════════════════════════════════════
+// TOOL 43: System Performance (paper P/L from auto-logged recommendations)
+// ═════════════════════════════════════════════════════════════════════════════
+
+server.registerTool(
+  "system_performance",
+  {
+    title: "System Recommendation Performance",
+    description: `Track how the system itself would perform if you blindly bet every
+top pick from screen_plays. Every screen_plays call auto-logs its top picks; this
+tool reports paper P/L, win rate, ROI, and CLV — separate from your actual bet log.
+
+This is the cleanest way to evaluate the system in isolation: even if you skip
+plays, the recommendation track record accumulates and we can backtest gates against it.
+
+Args:
+  - sport (optional): filter
+  - market (optional): filter
+  - date_from / date_to (optional ISO strings)`,
+    inputSchema: {
+      sport: z.string().optional(),
+      market: z.string().optional(),
+      date_from: z.string().optional(),
+      date_to: z.string().optional(),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  async (params) => {
+    try {
+      const result = await getSystemPerformance(params);
+      return { content: [{ type: "text", text: truncateIfNeeded(JSON.stringify(result, null, 2)) }] };
+    } catch (error) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+      };
+    }
+  }
+);
+
+// ═════════════════════════════════════════════════════════════════════════════
 // HTTP Server + MCP Transport
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -2195,7 +2281,7 @@ async function startServer(): Promise<void> {
       server: process.env.MCP_SERVER_NAME ?? "betting-intelligence",
       version: "1.0.0",
       timestamp: new Date().toISOString(),
-      tools: 41,
+      tools: 43,
     });
   });
 
@@ -2240,7 +2326,7 @@ async function startServer(): Promise<void> {
 ║  Betting Intelligence MCP Server                         ║
 ║  Running on http://0.0.0.0:${port}/mcp                      ║
 ║  Health check: http://0.0.0.0:${port}/health                ║
-║  Tools: 41 registered                                    ║
+║  Tools: 43 registered                                    ║
 ║  Transport: Streamable HTTP (stateless JSON)             ║
 ║  Background: line snapshots, auto-alerts, auto-CLV       ║
 ╚══════════════════════════════════════════════════════════╝

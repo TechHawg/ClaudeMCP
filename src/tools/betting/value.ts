@@ -437,3 +437,56 @@ async function loadClvByCluster(
 
   return out;
 }
+
+/**
+ * Load CLV/win-rate stats for prop clusters keyed by (sport, market, book).
+ * Returns a map: cluster_key → { avg_no_vig_clv, win_rate_pct, n }.
+ *
+ * For props we cluster by `market` (e.g., player_points) instead of bet_type
+ * (which is just "prop" for everything). When closing-line CLV isn't available
+ * we fall back to win-rate as the gating signal.
+ */
+export async function loadPropClusterStats(
+  sport?: string,
+  lookbackDays = 90
+): Promise<Map<string, { avg_no_vig_clv: number | null; win_rate_pct: number; n: number }>> {
+  const out = new Map<string, { avg_no_vig_clv: number | null; win_rate_pct: number; n: number }>();
+  if (!isDatabaseConfigured()) return out;
+  try {
+    const rows = await query<{
+      sport: string;
+      market: string;
+      book: string;
+      avg_clv: string | number | null;
+      wins: string | number;
+      decided: string | number;
+    }>(
+      `SELECT sport, market, book,
+              AVG(no_vig_clv)::float AS avg_clv,
+              SUM(CASE WHEN outcome = 'win' THEN 1 ELSE 0 END) AS wins,
+              SUM(CASE WHEN outcome IN ('win','loss') THEN 1 ELSE 0 END) AS decided
+         FROM bets
+        WHERE bet_type = 'prop'
+          AND market IS NOT NULL
+          AND outcome IN ('win','loss','push')
+          AND created_at > NOW() - ($1::int || ' days')::interval
+          AND ($2::text IS NULL OR sport = $2)
+        GROUP BY sport, market, book
+        HAVING SUM(CASE WHEN outcome IN ('win','loss') THEN 1 ELSE 0 END) >= 10`,
+      [lookbackDays, sport ?? null]
+    );
+    for (const r of rows) {
+      const key = `${r.sport}|${r.market}|${r.book}`.toLowerCase();
+      const decided = Number(r.decided);
+      const wr = decided > 0 ? (Number(r.wins) / decided) * 100 : 0;
+      out.set(key, {
+        avg_no_vig_clv: r.avg_clv == null ? null : Number(r.avg_clv),
+        win_rate_pct: Number(wr.toFixed(2)),
+        n: decided,
+      });
+    }
+  } catch (err) {
+    console.error("[ValueScan] prop cluster CLV query failed:", err);
+  }
+  return out;
+}

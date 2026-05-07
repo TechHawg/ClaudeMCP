@@ -16,6 +16,7 @@ import { calculateKelly } from "./kelly.js";
 import { scanProps, type PropEdgePlay } from "./scan_props.js";
 import { resolveSportKey, type DataQuality } from "../../utils/helpers.js";
 import { logBetRejection } from "../learning/rejection_log.js";
+import { logSystemRecommendations } from "../learning/system_recommendations.js";
 
 export interface ScreenedPlay {
   rank: number;
@@ -241,6 +242,30 @@ export async function screenPlays(params: {
   plays.sort((a, b) => b.recommended_stake - a.recommended_stake);
   for (let i = 0; i < plays.length; i++) plays[i].rank = i + 1;
   const top = plays.slice(0, topN);
+
+  // Auto-log system recommendations so we have a track record of the system
+  // separate from the user's actual bets. Fire-and-forget; failure here must
+  // not break the screen.
+  if (top.length > 0) {
+    const scanId = `scan_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    logSystemRecommendations(
+      scanId,
+      top.map((p) => ({
+        scan_id: scanId,
+        sport: p.sport,
+        market: p.market,
+        game: p.game,
+        side: p.side,
+        point: p.point,
+        best_book: p.best_book,
+        best_price: p.best_price,
+        no_vig_edge_pct: p.no_vig_edge_pct,
+        ev_percentage: p.ev_percentage,
+        recommended_stake: p.recommended_stake,
+        kelly_fraction: p.kelly_fraction_used,
+      }))
+    ).catch((err) => console.error("[ScreenPlays] system rec log failed:", err));
+  }
 
   if (top.length === 0) {
     notes.push(

@@ -56,6 +56,15 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'bets' AND column_name = 'data_quality') THEN
     ALTER TABLE bets ADD COLUMN data_quality VARCHAR(20) DEFAULT 'real';
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'bets' AND column_name = 'is_live') THEN
+    ALTER TABLE bets ADD COLUMN is_live BOOLEAN DEFAULT FALSE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'bets' AND column_name = 'live_drift_pct') THEN
+    ALTER TABLE bets ADD COLUMN live_drift_pct NUMERIC(6,3);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'bets' AND column_name = 'live_drift_captured_at') THEN
+    ALTER TABLE bets ADD COLUMN live_drift_captured_at TIMESTAMPTZ;
+  END IF;
 END $$;
 
 CREATE INDEX IF NOT EXISTS idx_bets_sport ON bets(sport);
@@ -272,3 +281,36 @@ CREATE TABLE IF NOT EXISTS bet_rejections (
 CREATE INDEX IF NOT EXISTS idx_rejections_sport ON bet_rejections(sport);
 CREATE INDEX IF NOT EXISTS idx_rejections_reason ON bet_rejections(reason);
 CREATE INDEX IF NOT EXISTS idx_rejections_at ON bet_rejections(rejected_at);
+
+-- ── System Recommendations (auto-logged from screen_plays) ─────────────────
+-- Every play that screen_plays surfaces is recorded here. This gives us a
+-- "system performance" track separate from the user's actual bets. Fields
+-- mirror screen_plays output; outcome is filled by auto-settle once available.
+CREATE TABLE IF NOT EXISTS system_recommendations (
+  id              SERIAL PRIMARY KEY,
+  recommended_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  scan_id         VARCHAR(64) NOT NULL,             -- groups plays from one screen_plays call
+  sport           VARCHAR(50) NOT NULL,
+  market          VARCHAR(50) NOT NULL,
+  game            VARCHAR(200) NOT NULL,
+  side            VARCHAR(200) NOT NULL,
+  point           NUMERIC(10,2),
+  best_book       VARCHAR(100) NOT NULL,
+  best_price      INTEGER NOT NULL,
+  no_vig_edge_pct NUMERIC(6,3),
+  ev_percentage   NUMERIC(6,3),
+  recommended_stake NUMERIC(12,2),
+  kelly_fraction  NUMERIC(4,3),
+  closing_line    INTEGER,
+  closing_no_vig_prob NUMERIC(6,4),
+  no_vig_clv      NUMERIC(6,3),
+  outcome         VARCHAR(10),                       -- win/loss/push/void/null
+  paper_payout    NUMERIC(12,2),                     -- "paper" payout assuming user actually bet recommended_stake
+  game_date       DATE,
+  raw_signal      JSONB
+);
+
+CREATE INDEX IF NOT EXISTS idx_sysrecs_at ON system_recommendations(recommended_at);
+CREATE INDEX IF NOT EXISTS idx_sysrecs_sport ON system_recommendations(sport);
+CREATE INDEX IF NOT EXISTS idx_sysrecs_outcome ON system_recommendations(outcome);
+CREATE INDEX IF NOT EXISTS idx_sysrecs_scan ON system_recommendations(scan_id);

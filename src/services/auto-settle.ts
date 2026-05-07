@@ -77,6 +77,89 @@ export async function runAutoSettle(): Promise<void> {
   } catch (error) {
     console.error("[AutoSettle] Cycle error:", error);
   }
+
+  // Also settle system_recommendations using the same scores cache.
+  await settleSystemRecommendations();
+}
+
+/** Settle open system_recommendations rows using the score cache. */
+async function settleSystemRecommendations(): Promise<void> {
+  if (!isDatabaseConfigured()) return;
+  try {
+    const open = (await query(
+      `SELECT id, sport, market, game, side, point, best_price, recommended_stake
+         FROM system_recommendations
+        WHERE outcome IS NULL
+          AND recommended_at >= NOW() - INTERVAL '7 days'
+        LIMIT 200`
+    )) as Record<string, unknown>[];
+    if (open.length === 0) return;
+
+    const bySport = new Map<string, Record<string, unknown>[]>();
+    for (const row of open) {
+      const s = String(row.sport);
+      if (!bySport.has(s)) bySport.set(s, []);
+      bySport.get(s)!.push(row);
+    }
+
+    for (const [sport, recs] of bySport) {
+      const scores = await fetchScores(sport);
+      if (scores.length === 0) continue;
+
+      for (const rec of recs) {
+        try {
+          const game = String(rec.game ?? "").toLowerCase();
+          const market = String(rec.market ?? "").toLowerCase();
+          const side = String(rec.side ?? "").toLowerCase();
+          const point = rec.point != null ? Number(rec.point) : null;
+          const odds = Number(rec.best_price);
+          const stake = Number(rec.recommended_stake ?? 0);
+          const tokens = game.split(/[^a-z0-9]+/).filter((t) => t.length >= 4);
+          const match = scores.find((s) => {
+            if (s.status !== "final") return false;
+            const homeT = s.home_team.toLowerCase().split(/\s+/).filter((w) => w.length >= 4);
+            const awayT = s.away_team.toLowerCase().split(/\s+/).filter((w) => w.length >= 4);
+            return homeT.some((w) => tokens.includes(w)) || awayT.some((w) => tokens.includes(w));
+          });
+          if (!match) continue;
+
+          const total = match.home_score + match.away_score;
+          const homeMargin = match.home_score - match.away_score;
+
+          let outcome: "win" | "loss" | "push" | null = null;
+          if (market === "h2h" || market === "moneyline") {
+            const onHome = side.includes(match.home_team.toLowerCase().split(" ")[0]);
+            outcome = onHome
+              ? (homeMargin > 0 ? "win" : homeMargin < 0 ? "loss" : "push")
+              : (homeMargin < 0 ? "win" : homeMargin > 0 ? "loss" : "push");
+          } else if (market === "spreads" && point != null) {
+            const onHome = side.includes(match.home_team.toLowerCase().split(" ")[0]);
+            const adj = onHome ? homeMargin + point : -homeMargin + point;
+            outcome = adj > 0 ? "win" : adj < 0 ? "loss" : "push";
+          } else if (market === "totals" && point != null) {
+            if (side.includes("over")) outcome = total > point ? "win" : total < point ? "loss" : "push";
+            else if (side.includes("under")) outcome = total < point ? "win" : total > point ? "loss" : "push";
+          }
+          if (!outcome) continue;
+
+          let payout = 0;
+          if (outcome === "win") payout = odds > 0 ? stake + stake * (odds / 100) : stake + stake * (100 / Math.abs(odds));
+          else if (outcome === "push") payout = stake;
+
+          await query(
+            `UPDATE system_recommendations
+                SET outcome = $1, paper_payout = $2
+              WHERE id = $3 AND outcome IS NULL`,
+            [outcome, Number(payout.toFixed(2)), rec.id]
+          );
+        } catch (err) {
+          console.error(`[AutoSettle/sysrec] failed for #${rec.id}:`, err instanceof Error ? err.message : err);
+        }
+      }
+    }
+  } catch (err) {
+    console.error("[AutoSettle/sysrec] cycle failed:", err);
+  }
 }
 
 /**

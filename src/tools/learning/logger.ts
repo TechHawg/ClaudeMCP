@@ -37,6 +37,8 @@ export interface BetLogInput {
   edge_is_no_vig?: boolean;
   data_quality?: "real" | "inferred" | "prior" | "missing";
   closing_pinnacle_no_vig_prob?: number;
+  // ── iter12 fields ────
+  is_live?: boolean;
 }
 
 export interface BetLogResult {
@@ -81,12 +83,14 @@ export async function logBet(input: BetLogInput): Promise<BetLogResult> {
       side, line, odds, stake, book, edge_pct, sharp_pct, public_pct,
       kelly_fraction, confidence_score, weather_summary, injury_flags,
       situational_angles,
-      no_vig_edge_pct, edge_is_no_vig, data_quality, closing_pinnacle_no_vig_prob
+      no_vig_edge_pct, edge_is_no_vig, data_quality, closing_pinnacle_no_vig_prob,
+      is_live
     ) VALUES (
       $1, $2, $3, $4, $5, $6, $7,
       $8, $9, $10, $11, $12, $13, $14, $15,
       $16, $17, $18, $19, $20,
-      $21, $22, $23, $24
+      $21, $22, $23, $24,
+      $25
     ) RETURNING id`,
     [
       input.sport,
@@ -113,6 +117,7 @@ export async function logBet(input: BetLogInput): Promise<BetLogResult> {
       input.edge_is_no_vig ?? false,
       input.data_quality ?? "real",
       input.closing_pinnacle_no_vig_prob ?? null,
+      input.is_live ?? false,
     ]
   );
 

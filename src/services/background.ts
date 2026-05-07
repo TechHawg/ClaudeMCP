@@ -13,6 +13,7 @@ import { americanToImpliedProb, noVigProb2Way } from "../utils/helpers.js";
 import { runAutoSettle, runEnhancedClvCapture } from "./auto-settle.js";
 import { runBackfill } from "./backfill/index.js";
 import { runSteamScan } from "./steam_scanner.js";
+import { runLiveDriftCapture } from "./live_drift.js";
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -82,7 +83,22 @@ export function startBackgroundServices(): void {
     intervals.push(setInterval(runSteamScanSafe, 5 * 60 * 1000));
   }
 
+  // 9. Live in-play drift capture — every 60s, picks up live bets from the
+  //    1-15min window and records the no-vig prob shift.
+  if (isDatabaseConfigured()) {
+    intervals.push(setInterval(runLiveDriftSafe, 60 * 1000));
+  }
+
   console.error("[Background] All services started");
+}
+
+async function runLiveDriftSafe(): Promise<void> {
+  try {
+    const r = await runLiveDriftCapture();
+    if (r.updated > 0) console.error(`[LiveDrift] Updated ${r.updated}/${r.processed} live bets`);
+  } catch (err) {
+    console.error("[LiveDrift] error:", err);
+  }
 }
 
 async function runSteamScanSafe(): Promise<void> {

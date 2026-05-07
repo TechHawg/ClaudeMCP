@@ -20,6 +20,8 @@ import {
   type DataQuality,
 } from "../../utils/helpers.js";
 import { isDatabaseConfigured, query } from "../../db/client.js";
+import { getProbableStarters } from "./probable_starters.js";
+import { loadPropClusterStats } from "./value.js";
 
 const SHARP_PROP_BOOKS = new Set([
   "pinnacle",
@@ -64,6 +66,12 @@ export interface PropEdgePlay {
   hit_rate_sample_size?: number;
   hit_rate_data_quality?: "real" | "inferred" | "missing";
   all_book_offers: Array<{ book: string; over: number; under?: number }>;
+  /** For MLB pitcher / NHL goalie props: whether the player is confirmed to start today. */
+  starter_status?: "confirmed" | "probable" | "unconfirmed";
+  starter_check_warning?: string;
+  /** Prop CLV gate result (cluster keyed by sport|market|book). */
+  passes_clv_gate?: boolean;
+  clv_gate_reason?: string;
 }
 
 export interface ScanPropsResult {
@@ -83,13 +91,21 @@ export async function scanProps(params: {
   max_events?: number;
   /** If true (default) and prop_hit_rates has data, attach hit rates per play. */
   include_hit_rate?: boolean;
+  /** Refuse to surface plays in prop clusters with negative CLV / win rate (default true). */
+  enforce_clv_gate?: boolean;
 }): Promise<ScanPropsResult> {
   const sportKey = resolveSportKey(params.sport);
   const minEdge = params.min_edge_pct ?? 2;
   const maxEvents = params.max_events ?? 8;
   const markets = params.markets ?? DEFAULT_MARKETS_BY_SPORT[sportKey] ?? [];
   const includeHitRate = params.include_hit_rate ?? true;
+  const enforceClvGate = params.enforce_clv_gate ?? true;
   const notes: string[] = [];
+
+  // Preload prop cluster CLV/win-rate stats once so we don't query per-play.
+  const propClusterStats = enforceClvGate
+    ? await loadPropClusterStats(params.sport.toLowerCase())
+    : new Map<string, { avg_no_vig_clv: number | null; win_rate_pct: number; n: number }>();
 
   const apiKey = process.env.THE_ODDS_API_KEY;
   if (!apiKey) {
@@ -216,15 +232,99 @@ export async function scanProps(params: {
     await enrichHitRates(allPlays);
   }
 
-  allPlays.sort((a, b) => b.no_vig_edge_pct - a.no_vig_edge_pct);
+  // Starter check for MLB pitcher and NHL goalie markets — refuse to surface
+  // a saves/strikeouts prop on a player who isn't confirmed/probable to start.
+  await enrichStarterChecks(allPlays, params.sport);
+
+  // Apply prop CLV gate: refuse plays in clusters with negative CLV or
+  // demonstrably negative win-rate (≥30 settled bets).
+  for (const p of allPlays) {
+    const clusterKey = `${params.sport.toLowerCase()}|${p.market}|${p.best_book}`.toLowerCase();
+    const stats = propClusterStats.get(clusterKey);
+    if (!enforceClvGate || !stats) {
+      p.passes_clv_gate = true;
+      p.clv_gate_reason = stats
+        ? `Cluster has ${stats.n} bets but gate disabled.`
+        : "No prior history for this prop cluster (default: pass).";
+      continue;
+    }
+    // Use no-vig CLV when available; fall back to win rate.
+    if (stats.avg_no_vig_clv != null) {
+      const passes = stats.avg_no_vig_clv >= -0.5; // 0.5pp buffer
+      p.passes_clv_gate = passes;
+      p.clv_gate_reason = passes
+        ? `Cluster CLV ${stats.avg_no_vig_clv.toFixed(2)}% over ${stats.n} bets — acceptable.`
+        : `Cluster CLV ${stats.avg_no_vig_clv.toFixed(2)}% over ${stats.n} bets — historically negative; suppressed.`;
+    } else if (stats.n >= 30) {
+      const passes = stats.win_rate_pct >= 48;
+      p.passes_clv_gate = passes;
+      p.clv_gate_reason = passes
+        ? `Cluster win rate ${stats.win_rate_pct.toFixed(1)}% over ${stats.n} bets — acceptable.`
+        : `Cluster win rate ${stats.win_rate_pct.toFixed(1)}% over ${stats.n} bets — historically poor; suppressed.`;
+    } else {
+      p.passes_clv_gate = true;
+      p.clv_gate_reason = `Cluster only has ${stats.n} bets — gate inactive (need ≥30).`;
+    }
+  }
+
+  // Drop plays that fail starter check OR fail prop CLV gate.
+  const filtered = allPlays.filter((p) => {
+    if (isStarterDependentMarket(p.market) && p.starter_status === "unconfirmed") return false;
+    if (enforceClvGate && p.passes_clv_gate === false) return false;
+    return true;
+  });
+
+  filtered.sort((a, b) => b.no_vig_edge_pct - a.no_vig_edge_pct);
 
   return {
     sport: params.sport,
     events_scanned: events.length,
     markets_scanned: markets,
-    plays: allPlays.slice(0, 30),
+    plays: filtered.slice(0, 30),
     notes,
   };
+}
+
+function isStarterDependentMarket(market: string): boolean {
+  const m = market.toLowerCase();
+  return (
+    m.includes("pitcher_") ||
+    m === "player_total_saves" ||
+    m === "goalie_saves"
+  );
+}
+
+async function enrichStarterChecks(plays: PropEdgePlay[], sport: string): Promise<void> {
+  const sportLower = sport.toLowerCase();
+  if (sportLower !== "mlb" && sportLower !== "nhl") return;
+
+  // Only fetch if any play actually depends on a starter
+  const starterMarkets = plays.filter((p) => isStarterDependentMarket(p.market));
+  if (starterMarkets.length === 0) return;
+
+  let starters: Awaited<ReturnType<typeof getProbableStarters>>;
+  try {
+    starters = await getProbableStarters({ sport: sportLower });
+  } catch (err) {
+    console.error("[ScanProps] starter check fetch failed:", err);
+    return;
+  }
+  const startersSet = new Set(starters.starters.map((s) => s.player.toLowerCase()));
+  const statusByPlayer = new Map(
+    starters.starters.map((s) => [s.player.toLowerCase(), s.status] as const)
+  );
+
+  for (const p of plays) {
+    if (!isStarterDependentMarket(p.market)) continue;
+    if (startersSet.has(p.player.toLowerCase())) {
+      const raw = statusByPlayer.get(p.player.toLowerCase()) ?? "probable";
+      p.starter_status = raw === "unknown" ? "probable" : raw;
+    } else {
+      p.starter_status = "unconfirmed";
+      p.starter_check_warning =
+        `${p.player} is NOT listed as a probable starter for today's slate — fade or pass this prop.`;
+    }
+  }
 }
 
 async function enrichHitRates(plays: PropEdgePlay[]): Promise<void> {

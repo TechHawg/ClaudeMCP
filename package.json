@@ -9,6 +9,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc && cp src/db/schema.sql dist/db/schema.sql",
     "test": "npm run build && node --test tests/*.test.mjs",
+    "backfill": "npm run build && node dist/scripts/run-backfill.js",
     "clean": "rm -rf dist"
   },
   "engines": {
