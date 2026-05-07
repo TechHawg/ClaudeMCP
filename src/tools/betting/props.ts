@@ -8,7 +8,7 @@
  */
 
 import axios from "axios";
-import { formatApiError, resolveSportKey } from "../../utils/helpers.js";
+import { formatApiError, resolveSportKey, multiBookConsensusNoVig } from "../../utils/helpers.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -32,6 +32,12 @@ export interface PropCard {
   confidence_score: number; // 1-10
   supporting_data: string[];
   data_quality: "real" | "inferred" | "missing";
+  // Multi-book consensus (from sharp-book de-vig)
+  fair_prob_pct?: number;
+  fair_source?: string;
+  fair_books?: string[];
+  fair_sample_size?: number;
+  no_vig_edge_pct?: number;
   cached_at: string;
 }
 
@@ -124,6 +130,11 @@ export async function buildPlayerProp(params: {
     confidence_score: confidence,
     supporting_data: supporting,
     data_quality: overallDq,
+    fair_prob_pct: propLines.fair_prob_pct,
+    fair_source: propLines.fair_source,
+    fair_books: propLines.fair_books,
+    fair_sample_size: propLines.fair_sample_size,
+    no_vig_edge_pct: propLines.edge_pct,
     cached_at: now,
   };
 }
@@ -558,7 +569,26 @@ interface PropLine {
   line: number;
   book: string;
   odds: number;
+  // Multi-book consensus extras (populated by fetchPropLines):
+  fair_prob_pct?: number;
+  fair_source?: "multi_book_consensus" | "single_sharp_book" | "no_consensus";
+  fair_books?: string[];
+  fair_sample_size?: number;
+  edge_pct?: number;
+  data_quality?: "real" | "inferred" | "missing";
+  /** All book offers we observed for the chosen line, ranked by price desc. */
+  all_book_offers?: Array<{ book: string; over_price: number; under_price?: number }>;
 }
+
+const SHARP_PROP_BOOKS = new Set([
+  "pinnacle",
+  "circasports",
+  "circa",
+  "bookmaker_eu",
+  "bookmaker.eu",
+  "betcris",
+  "matchbook",
+]);
 
 async function fetchPropLines(
   sportKey: string,
@@ -690,33 +720,96 @@ async function fetchPropLines(
       );
 
       const bookmakers = oddsResp.data?.bookmakers ?? [];
-      let bestLine: PropLine | null = null;
+
+      // Collect every (book, over, under) for this player. We pair over and under
+      // at the SAME book and SAME point so we can de-vig per book.
+      interface BookOffer { book: string; line: number; over_price: number; under_price?: number }
+      const offersByLine = new Map<number, Map<string, BookOffer>>();
 
       for (const bm of bookmakers) {
+        const bookKey = String(bm.key).toLowerCase();
         for (const mkt of bm.markets ?? []) {
           for (const outcome of mkt.outcomes ?? []) {
             const desc = String(outcome.description ?? "").toLowerCase();
-            if (desc.includes(playerLower)) {
-              const price = outcome.price as number;
-              const point = outcome.point as number;
+            if (!desc.includes(playerLower)) continue;
+            const price = outcome.price as number;
+            const point = outcome.point as number;
+            if (point == null) continue;
+            const sideName = String(outcome.name).toLowerCase();
 
-              // Pick the best odds (highest price) for the over
-              if (
-                String(outcome.name).toLowerCase() === "over" &&
-                (!bestLine || price > bestLine.odds)
-              ) {
-                bestLine = {
-                  line: point,
-                  book: bm.key as string,
-                  odds: price,
-                };
-              }
+            if (!offersByLine.has(point)) offersByLine.set(point, new Map());
+            const lineBucket = offersByLine.get(point)!;
+            if (!lineBucket.has(bookKey)) {
+              lineBucket.set(bookKey, { book: bookKey, line: point, over_price: 0 });
             }
+            const off = lineBucket.get(bookKey)!;
+            if (sideName === "over") off.over_price = price;
+            else if (sideName === "under") off.under_price = price;
           }
         }
       }
 
-      if (bestLine) return bestLine;
+      if (offersByLine.size === 0) continue;
+
+      // Pick the most-offered line (the "consensus" line) — usually all books agree.
+      let bestPoint = 0;
+      let bestPointCount = -1;
+      for (const [pt, bucket] of offersByLine) {
+        if (bucket.size > bestPointCount) {
+          bestPoint = pt;
+          bestPointCount = bucket.size;
+        }
+      }
+      const bucket = offersByLine.get(bestPoint)!;
+      const offers = [...bucket.values()].filter((o) => o.over_price !== 0);
+
+      // Multi-book consensus from sharp books that have BOTH sides priced.
+      const sharpPairs = offers
+        .filter((o) => SHARP_PROP_BOOKS.has(o.book) && o.under_price != null && o.over_price !== 0)
+        .map((o) => ({ priceA: o.over_price, priceB: o.under_price as number, book: o.book }));
+
+      const consensus = sharpPairs.length > 0 ? multiBookConsensusNoVig(sharpPairs) : null;
+
+      // Best book price for OVER across ALL books.
+      offers.sort((a, b) => b.over_price - a.over_price);
+      const best = offers[0];
+      if (!best) continue;
+
+      let fairProb = 0;
+      let fairSource: PropLine["fair_source"] = "no_consensus";
+      let fairBooks: string[] = [];
+      let fairSampleSize = 0;
+      let edgePct = 0;
+      let dq: PropLine["data_quality"] = "missing";
+
+      if (consensus) {
+        fairProb = consensus.medianProbA.toNumber();
+        fairSource = consensus.sampleSize > 1 ? "multi_book_consensus" : "single_sharp_book";
+        fairBooks = consensus.books;
+        fairSampleSize = consensus.sampleSize;
+        const bestImplied = best.over_price > 0
+          ? 100 / (best.over_price + 100)
+          : -best.over_price / (-best.over_price + 100);
+        edgePct = (fairProb - bestImplied) * 100;
+        dq = "real";
+      }
+
+      return {
+        line: best.line,
+        book: best.book,
+        odds: best.over_price,
+        fair_prob_pct: fairProb > 0 ? Number((fairProb * 100).toFixed(2)) : undefined,
+        fair_source: fairSource,
+        fair_books: fairBooks,
+        fair_sample_size: fairSampleSize,
+        edge_pct: Number(edgePct.toFixed(3)),
+        data_quality: dq,
+        all_book_offers: offers.map((o) => ({
+          book: o.book,
+          over_price: o.over_price,
+          under_price: o.under_price,
+        })),
+      };
     }
 
     return { line: 0, book: "Player prop not found in current events", odds: -110 };
